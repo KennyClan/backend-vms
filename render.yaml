@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: vista-vms-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false        # set manually in the Render dashboard (Supabase URL)
+      - key: SECRET_KEY
+        sync: false        # set manually — generate a strong random value
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "480"
+      - key: CORS_ORIGINS
+        sync: false        # set manually — your Vercel URL
+      - key: MAIL_FROM
+        sync: false
+      - key: MAIL_PASSWORD
+        sync: false
+      - key: MAIL_FROM_NAME
+        value: "Vista VMS"
