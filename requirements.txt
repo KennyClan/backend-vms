@@ -13,4 +13,4 @@ qrcode[pil]==7.4.2
 Pillow==10.3.0
 slowapi==0.1.9
 webauthn==3.0.0
-resend==2.5.1
+
