@@ -80,16 +80,27 @@ async def create_area(
     current: dict               = Depends(require_roles(UserRole.admin, UserRole.recep)),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
-    try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO restricted_areas (name, description, floor, created_by)
-            VALUES ($1, $2, $3, $4) RETURNING *
-            """,
-            body.name, body.description, body.floor, uuid.UUID(str(current["id"])),
-        )
-    except asyncpg.UniqueViolationError:
-        raise HTTPException(400, "An area with this name already exists.")
+    # Floor plan objects default to a generic name ("Room", "Restricted")
+    # unless the user renames them, so collisions here are common and
+    # shouldn't block the auto-create-from-floor-plan flow. If the name is
+    # already taken, keep appending " (2)", " (3)", etc. until it isn't.
+    name = body.name
+    suffix = 1
+    while True:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO restricted_areas (name, description, floor, created_by)
+                VALUES ($1, $2, $3, $4) RETURNING *
+                """,
+                name, body.description, body.floor, uuid.UUID(str(current["id"])),
+            )
+            break
+        except asyncpg.UniqueViolationError:
+            suffix += 1
+            name = f"{body.name} ({suffix})"
+            if suffix > 50:  # sanity guard against an infinite loop
+                raise HTTPException(400, "An area with this name already exists.")
     await write_audit(conn, "Restricted Area Created", actor=current, detail=f"Area: {body.name}")
     return dict(row)
 
