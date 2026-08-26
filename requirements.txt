@@ -10,7 +10,7 @@ sqlalchemy==2.0.30
 alembic==1.13.1
 python-multipart==0.0.9
 qrcode[pil]==7.4.2
-Pillow==10.3.0
+Pillow==10.4.0
 slowapi==0.1.9
 webauthn==3.0.0
 
