@@ -217,15 +217,16 @@ async def lifespan(app: FastAPI):
         ]
         seeded = 0
         for name, email, password in accounts:
-            initials = "".join(w[0] for w in name.split()[:2]).upper()
-            result = await conn.execute(
-                """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
-                   VALUES ($1,$2,$3,$4,$5::user_role,true)
-                   ON CONFLICT (email) DO NOTHING""",
-                name, initials, email, hash_password(password), name,
-            )
-            if result == "INSERT 0 1":
+            exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
+            if not exists:
+                initials = "".join(w[0] for w in name.split()[:2]).upper()
+                await conn.execute(
+                    """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
+                       VALUES ($1,$2,$3,$4,$5,$6)""",
+                    name, initials, email, hash_password(password), name, True,
+                )
                 seeded += 1
+                logger.info(f"Seeded: {name} <{email}>")
         if seeded:
             logger.info(f"Seeded {seeded} new account(s)")
 
