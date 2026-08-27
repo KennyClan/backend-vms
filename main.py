@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     pool = get_pool()
     async with pool.acquire() as conn:
         # Add new enum values to user_role if missing
-        for val in ('super_admin', 'employee'):
+        for val in ('Super Admin', 'Employee'):
             await conn.execute(f"""
                 DO $$ BEGIN
                     ALTER TYPE user_role ADD VALUE IF NOT EXISTS '{val}';
@@ -194,20 +194,40 @@ async def lifespan(app: FastAPI):
         """)
         logger.info("Audit log table verified")
 
-        # Seed default Super Admin if no staff exist
-        existing = await conn.fetchval("SELECT COUNT(*) FROM staff_users")
-        if existing == 0:
-            from utils.auth import hash_password
-            sa_email = os.getenv("SEED_ADMIN_EMAIL", "admin@vistahq.com")
-            sa_pass  = os.getenv("SEED_ADMIN_PASSWORD", "Admin@12345")
-            sa_name  = os.getenv("SEED_ADMIN_NAME", "Super Admin")
-            initials = "".join(w[0] for w in sa_name.split()[:2]).upper() or "SA"
-            await conn.execute(
+        # Ensure email is unique on staff_users (needed for ON CONFLICT)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'staff_users'::regclass AND contype = 'u'
+                ) THEN
+                    ALTER TABLE staff_users ADD CONSTRAINT staff_users_email_unique UNIQUE (email);
+                END IF;
+            END $$;
+        """)
+
+        # Seed default accounts (skip any that already exist)
+        from utils.auth import hash_password
+        accounts = [
+            ("Super Admin",    "admin@vistahq.com",     "Admin@12345"),
+            ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
+            ("Receptionist",   "reception@vistahq.com", "Recep@12345"),
+            ("Security Guard", "security@vistahq.com",  "Guard@12345"),
+            ("Employee",       "employee@vistahq.com",  "Employee@12345"),
+        ]
+        seeded = 0
+        for name, email, password in accounts:
+            initials = "".join(w[0] for w in name.split()[:2]).upper()
+            result = await conn.execute(
                 """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
-                   VALUES ($1,$2,$3,$4,'super_admin',true)""",
-                sa_name, initials, sa_email, hash_password(sa_pass),
+                   VALUES ($1,$2,$3,$4,$5::user_role,true)
+                   ON CONFLICT (email) DO NOTHING""",
+                name, initials, email, hash_password(password), name,
             )
-            logger.info(f"Seeded Super Admin: {sa_email}")
+            if result == "INSERT 0 1":
+                seeded += 1
+        if seeded:
+            logger.info(f"Seeded {seeded} new account(s)")
 
     yield
     await close_pool()
