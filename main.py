@@ -209,7 +209,7 @@ async def lifespan(app: FastAPI):
         # Seed default accounts (skip any that already exist)
         from utils.auth import hash_password
         accounts = [
-            ("Super Admin",    "admin@vistahq.com",     "Admin@12345"),
+            ("Super Admin",    "superadmin@vistahq.com","Admin@12345"),
             ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
             ("Receptionist",   "reception@vistahq.com", "Recep@12345"),
             ("Security Guard", "security@vistahq.com",  "Guard@12345"),
@@ -302,7 +302,7 @@ async def seed_accounts():
                 errors.append(f"enum {val}: {e}")
 
         accounts = [
-            ("Super Admin",    "admin@vistahq.com",     "Admin@12345"),
+            ("Super Admin",    "superadmin@vistahq.com","Admin@12345"),
             ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
             ("Receptionist",   "reception@vistahq.com", "Recep@12345"),
             ("Security Guard", "security@vistahq.com",  "Guard@12345"),
