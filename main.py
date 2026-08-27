@@ -220,13 +220,16 @@ async def lifespan(app: FastAPI):
             exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
             if not exists:
                 initials = "".join(w[0] for w in name.split()[:2]).upper()
-                await conn.execute(
-                    """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
-                       VALUES ($1,$2,$3,$4,$5,$6)""",
-                    name, initials, email, hash_password(password), name, True,
-                )
-                seeded += 1
-                logger.info(f"Seeded: {name} <{email}>")
+                try:
+                    await conn.execute(
+                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
+                           VALUES ($1,$2,$3,$4,$5::user_role,$6)""",
+                        name, initials, email, hash_password(password), name, True,
+                    )
+                    seeded += 1
+                    logger.info(f"Seeded: {name} <{email}>")
+                except Exception as e:
+                    logger.error(f"Failed to seed {email}: {e}")
         if seeded:
             logger.info(f"Seeded {seeded} new account(s)")
 
@@ -268,23 +271,36 @@ app.include_router(floor_plan.router)
 app.include_router(departments.router)
 
 # Manual seed endpoint — call once after first deploy
+import traceback
 from fastapi import APIRouter
 from database import get_pool
 from utils.auth import hash_password
 
 _seed_router = APIRouter()
 
+@_seed_router.get("/admin/accounts")
+async def list_accounts():
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id, name, email, role, is_active FROM staff_users ORDER BY created_at")
+        return [{"id": str(r["id"]), "name": r["name"], "email": r["email"], "role": r["role"], "is_active": r["is_active"]} for r in rows]
+
 @_seed_router.post("/admin/seed")
 async def seed_accounts():
     pool = get_pool()
     async with pool.acquire() as conn:
+        errors = []
         # Ensure enum values exist
         for val in ('Super Admin', 'Employee'):
-            await conn.execute(
-                "DO $$ BEGIN ALTER TYPE user_role ADD VALUE IF NOT EXISTS '"
-                + val
-                + "'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
-            )
+            try:
+                await conn.execute(
+                    "DO $$ BEGIN ALTER TYPE user_role ADD VALUE IF NOT EXISTS '"
+                    + val
+                    + "'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+                )
+            except Exception as e:
+                errors.append(f"enum {val}: {e}")
+
         accounts = [
             ("Super Admin",    "admin@vistahq.com",     "Admin@12345"),
             ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
@@ -297,13 +313,17 @@ async def seed_accounts():
             exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
             if not exists:
                 initials = "".join(w[0] for w in name.split()[:2]).upper()
-                await conn.execute(
-                    """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
-                       VALUES ($1,$2,$3,$4,$5,$6)""",
-                    name, initials, email, hash_password(password), name, True,
-                )
-                created.append(email)
-        return {"created": created, "message": f"Created {len(created)} account(s)" if created else "All accounts already exist"}
+                try:
+                    await conn.execute(
+                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
+                           VALUES ($1,$2,$3,$4,$5::user_role,$6)""",
+                        name, initials, email, hash_password(password), name, True,
+                    )
+                    created.append(email)
+                except Exception as e:
+                    errors.append(f"{email}: {e}")
+
+        return {"created": created, "errors": errors}
 
 app.include_router(_seed_router)
 
