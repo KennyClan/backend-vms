@@ -95,7 +95,7 @@ async def create_staff(
     row = await conn.fetchrow(
         """
         INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, post_id, department_id)
-        VALUES ($1, $2, $3, $4, $5, true, $6, $7)
+        VALUES ($1, $2, $3, $4, $5::user_role, true, $6, $7)
         RETURNING id, name, initials, email, role, is_active, post_id, department_id
         """,
         body.name, _initials(body.name), body.email.lower(),
@@ -132,7 +132,7 @@ async def update_staff(
     row = await conn.fetchrow(
         """
         UPDATE staff_users SET
-            role          = COALESCE($2, role),
+            role          = COALESCE($2::user_role, role),
             is_active     = COALESCE($3, is_active),
             post_id       = CASE WHEN $4 THEN NULL WHEN $5::uuid IS NOT NULL THEN $5 ELSE post_id END,
             department_id = CASE WHEN $6 THEN NULL WHEN $7::uuid IS NOT NULL THEN $7 ELSE department_id END
