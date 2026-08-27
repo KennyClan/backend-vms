@@ -24,6 +24,16 @@ async def lifespan(app: FastAPI):
     from database import get_pool
     pool = get_pool()
     async with pool.acquire() as conn:
+        # Add new enum values to user_role if missing
+        for val in ('super_admin', 'employee'):
+            await conn.execute(f"""
+                DO $$ BEGIN
+                    ALTER TYPE user_role ADD VALUE IF NOT EXISTS '{val}';
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END $$;
+            """)
+        logger.info("user_role enum verified")
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS floors (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
