@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime, time
 from typing import Optional
 from pydantic import BaseModel, EmailStr
-from models import ApprovalStatus
+from models import ApprovalStatus, DestinationType
 
 
 class TokenOut(BaseModel):
@@ -52,17 +52,22 @@ class VisitRequestIn(BaseModel):
     visit_date:     date
     expected_time:  Optional[time]      = None
     purpose:        str
+    destination_type: Optional[str] = None  # "Normal" or "Restricted" — auto-derived if host_staff_id provided
 
 
 class VisitRequestOut(BaseModel):
     id:                   uuid.UUID
     visitor_name:         str
     host_name:            str
+    host_staff_id:        Optional[uuid.UUID]
     visit_date:           date
     expected_time:        Optional[time]
     purpose:              str
     approval_status:      str
     status:               str
+    destination_type:     Optional[str]
+    rejection_reason:     Optional[str]
+    arrived_at:           Optional[datetime]
     badge_number:         Optional[str]
     visitor_id_verified:  bool
     checked_in_at:        Optional[datetime]
@@ -79,4 +84,15 @@ class CheckInIn(BaseModel):
 class ApprovalIn(BaseModel):
     action:           ApprovalStatus
     rejection_reason: Optional[str] = None
-    destination_post_id: Optional[uuid.UUID] = None  # which room/post this visitor is headed to
+    destination_post_id: Optional[uuid.UUID] = None
+
+
+class EmployeeVisitRequestIn(BaseModel):
+    """For Employee self-initiated pre-approved visits."""
+    visitor_name:   str
+    visitor_email:  Optional[EmailStr] = None
+    company:        Optional[str]      = None
+    phone:          Optional[str]      = None
+    visit_date:     date
+    expected_time:  Optional[time]     = None
+    purpose:        str

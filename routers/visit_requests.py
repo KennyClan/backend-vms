@@ -3,8 +3,9 @@ from datetime import date
 from typing import Optional
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from database import get_conn
-from schemas import VisitRequestIn, VisitRequestOut, CheckInIn, ApprovalIn
+from schemas import VisitRequestIn, VisitRequestOut, CheckInIn, ApprovalIn, EmployeeVisitRequestIn
 from models import UserRole, ApprovalStatus
 from utils.auth import get_current_user, require_roles
 from utils.audit import write_audit
@@ -20,7 +21,7 @@ async def list_requests(
     approval_status: Optional[str]  = None,
     visit_status:    Optional[str]  = None,
     visit_date:      Optional[date] = None,
-    _:               dict           = Depends(get_current_user),
+    current:         dict           = Depends(get_current_user),
     conn: asyncpg.Connection        = Depends(get_conn),
 ):
     clauses, args = [], []
@@ -30,6 +31,11 @@ async def list_requests(
         args.append(visit_status); clauses.append(f"status = ${len(args)}")
     if visit_date:
         args.append(visit_date); clauses.append(f"visit_date = ${len(args)}")
+
+    # Employees can only see requests where they are the host
+    if current["role"] == UserRole.employee.value:
+        args.append(uuid.UUID(str(current["id"]))); clauses.append(f"host_staff_id = ${len(args)}")
+
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows  = await conn.fetch(f"SELECT * FROM visit_requests {where} ORDER BY created_at DESC", *args)
     return [dict(r) for r in rows]
@@ -85,19 +91,34 @@ async def create_request(
             "Please wait for it to be approved or rejected before submitting a new one.",
         )
 
+    # Auto-derive destination_type from host's department if host_staff_id provided
+    destination_type = body.destination_type or "Normal"
+    if body.host_staff_id:
+        dept_info = await conn.fetchrow(
+            """
+            SELECT d.is_restricted
+            FROM staff_users su
+            JOIN departments d ON d.id = su.department_id
+            WHERE su.id = $1
+            """,
+            body.host_staff_id,
+        )
+        if dept_info and dept_info["is_restricted"]:
+            destination_type = "Restricted"
+
     row = await conn.fetchrow(
         """
         INSERT INTO visit_requests
           (visitor_id, visitor_name, visitor_email, host_name, host_staff_id,
-           visit_date, expected_time, purpose)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+           visit_date, expected_time, purpose, destination_type)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
         """,
         visitor_id, body.visitor_name, body.visitor_email,
         body.host_name, body.host_staff_id,
-        body.visit_date, body.expected_time, body.purpose,
+        body.visit_date, body.expected_time, body.purpose, destination_type,
     )
     await write_audit(conn, "Request Created", visit_request_id=row["id"],
-                      visitor_name=row["visitor_name"], detail=f"Visit date: {row['visit_date']}")
+                      visitor_name=row["visitor_name"], detail=f"Visit date: {row['visit_date']}, Destination: {destination_type}")
     return dict(row)
 
 
@@ -105,12 +126,24 @@ async def create_request(
 async def approve_or_reject(
     request_id: uuid.UUID,
     body:       ApprovalIn,
-    current:    dict               = Depends(require_roles(UserRole.admin, UserRole.recep)),
+    current:    dict               = Depends(get_current_user),
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
-    row = await conn.fetchrow("SELECT visitor_name FROM visit_requests WHERE id=$1", request_id)
+    row = await conn.fetchrow("SELECT * FROM visit_requests WHERE id=$1", request_id)
     if not row:
         raise HTTPException(404, "Request not found")
+
+    # Permission check: Employee can only approve/reject their own requests
+    if current["role"] == UserRole.employee.value:
+        if row["host_staff_id"] != uuid.UUID(str(current["id"])):
+            raise HTTPException(403, "You can only approve requests where you are the host")
+    elif current["role"] not in [UserRole.admin.value, UserRole.super_admin.value]:
+        raise HTTPException(403, "Insufficient permissions")
+
+    # Rejection requires a reason
+    if body.action == ApprovalStatus.rejected and not body.rejection_reason:
+        raise HTTPException(400, "Rejection reason is required")
+
     if body.action == ApprovalStatus.approved:
         await conn.execute(
             "UPDATE visit_requests SET approval_status='Approved', status='Pending Arrival', approved_by=$1, approved_at=NOW(), destination_post_id=$3 WHERE id=$2",
@@ -313,3 +346,175 @@ async def resend_pass(
     if not sent:
         raise HTTPException(500, "Failed to send email. Check server logs.")
     return {"detail": "QR pass sent successfully", "to": row["visitor_email"]}
+
+
+# ---------------------------------------------------------------------
+# Employee: self-initiated pre-approved visit
+# ---------------------------------------------------------------------
+@router.post("/self-visit", response_model=VisitRequestOut, status_code=201)
+async def create_self_visit(
+    body: EmployeeVisitRequestIn,
+    current: dict = Depends(require_roles(UserRole.employee)),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Employee creates a visit request for themselves — auto-approved immediately."""
+    host_id = uuid.UUID(str(current["id"]))
+    host_name = current["name"]
+
+    # Auto-derive destination_type from employee's department
+    destination_type = "Normal"
+    dept_info = await conn.fetchrow(
+        """
+        SELECT d.is_restricted
+        FROM staff_users su
+        JOIN departments d ON d.id = su.department_id
+        WHERE su.id = $1
+        """,
+        host_id,
+    )
+    if dept_info and dept_info["is_restricted"]:
+        destination_type = "Restricted"
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO visit_requests
+          (visitor_name, visitor_email, company, phone,
+           host_name, host_staff_id, visit_date, expected_time, purpose,
+           approval_status, status, approved_by, approved_at, destination_type)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Approved','Pending Arrival',$10,NOW(),$11)
+          RETURNING *
+        """,
+        body.visitor_name, body.visitor_email, body.company, body.phone,
+        host_name, host_id, body.visit_date, body.expected_time, body.purpose,
+        host_id, destination_type,
+    )
+
+    await write_audit(conn, "Self-Visit Created", actor=current, visit_request_id=row["id"],
+                      visitor_name=row["visitor_name"], detail=f"Auto-approved, date: {row['visit_date']}")
+
+    # Send QR pass email immediately
+    if body.visitor_email:
+        asyncio.create_task(send_qr_pass_email(
+            to_email     = body.visitor_email,
+            visitor_name = body.visitor_name,
+            host_name    = host_name,
+            visit_date   = str(body.visit_date),
+            expected_time= str(body.expected_time) if body.expected_time else "",
+            purpose      = body.purpose,
+            qr_ref       = row["qr_ref"],
+        ))
+
+    return dict(row)
+
+
+# ---------------------------------------------------------------------
+# Guard: destination arrival confirmation (restricted areas)
+# ---------------------------------------------------------------------
+class DestinationArrivalIn(BaseModel):
+    badge_number: str
+
+
+@router.post("/{request_id}/destination-arrival")
+async def confirm_destination_arrival(
+    request_id: uuid.UUID,
+    body: DestinationArrivalIn,
+    current: dict = Depends(require_roles(UserRole.guard, UserRole.admin, UserRole.super_admin)),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Guard at a restricted area confirms the visitor has arrived at their destination."""
+    row = await conn.fetchrow("SELECT * FROM visit_requests WHERE id=$1", request_id)
+    if not row:
+        raise HTTPException(404, "Request not found")
+    if row["destination_type"] != "Restricted":
+        raise HTTPException(400, "This request is not for a restricted destination")
+    if row["status"] not in ("Checked In", "Pending Arrival"):
+        raise HTTPException(400, f"Visitor must be checked in first (current status: {row['status']})")
+
+    await conn.execute(
+        "UPDATE visit_requests SET arrived_at=NOW() WHERE id=$1",
+        request_id,
+    )
+    await write_audit(conn, "Destination Arrival", actor=current, visit_request_id=request_id,
+                      visitor_name=row["visitor_name"], detail=f"Badge: {body.badge_number}")
+
+    return {"id": request_id, "arrived_at": "now", "detail": "Destination arrival confirmed"}
+
+
+# ---------------------------------------------------------------------
+# Receptionist / Admin / Employee: notify host of visitor arrival
+# ---------------------------------------------------------------------
+@router.post("/{request_id}/notify-host")
+async def notify_host(
+    request_id: uuid.UUID,
+    current: dict = Depends(require_roles(UserRole.recep, UserRole.admin, UserRole.super_admin, UserRole.employee)),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Send an email to the host saying their visitor is waiting at the front desk."""
+    row = await conn.fetchrow("SELECT * FROM visit_requests WHERE id=$1", request_id)
+    if not row:
+        raise HTTPException(404, "Request not found")
+    if not row["host_staff_id"]:
+        raise HTTPException(400, "No host staff assigned to this request")
+
+    host = await conn.fetchrow("SELECT email, name FROM staff_users WHERE id=$1", row["host_staff_id"])
+    if not host or not host["email"]:
+        raise HTTPException(400, "Host has no email address on file")
+
+    # Reuse the status update email with a custom message
+    asyncio.create_task(send_status_update_email(
+        to_email     = host["email"],
+        visitor_name = row["visitor_name"],
+        host_name    = host["name"],
+        visit_date   = str(row["visit_date"]),
+        status       = "Visitor Waiting",
+        extra_note   = f"{row['visitor_name']} is waiting at the front desk for you.",
+    ))
+
+    await write_audit(conn, "Host Notified", actor=current, visit_request_id=request_id,
+                      visitor_name=row["visitor_name"], detail=f"Notified host: {host['name']}")
+    return {"detail": f"Notification sent to {host['name']}"}
+
+
+# ---------------------------------------------------------------------
+# Room capacity monitoring (all rooms, not just restricted)
+# ---------------------------------------------------------------------
+@router.get("/room-capacity")
+async def room_capacity(
+    current: dict = Depends(require_roles(UserRole.recep, UserRole.admin, UserRole.super_admin)),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Current occupancy across all rooms/posts."""
+    rows = await conn.fetch(
+        """
+        SELECT p.id, p.name, p.floor,
+               COUNT(rv.id) FILTER (WHERE rv.departed_at IS NULL) AS current_occupancy,
+               ARRAY_AGG(DISTINCT su.name) FILTER (WHERE su.name IS NOT NULL) AS assigned_staff
+        FROM posts p
+        LEFT JOIN room_visits rv ON rv.post_id = p.id
+        LEFT JOIN staff_users su ON su.post_id = p.id AND su.is_active
+        GROUP BY p.id, p.name, p.floor
+        ORDER BY p.floor, p.name
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------
+# Employee list (for dropdown selection when creating visit requests)
+# ---------------------------------------------------------------------
+@router.get("/employees")
+async def list_employees(
+    current: dict = Depends(get_current_user),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Active employees that can be selected as hosts."""
+    rows = await conn.fetch(
+        """
+        SELECT su.id, su.name, su.email, d.name AS department_name
+        FROM staff_users su
+        LEFT JOIN departments d ON d.id = su.department_id
+        WHERE su.role = 'Employee' AND su.is_active = true
+        ORDER BY su.name
+        """
+    )
+    return [dict(r) for r in rows]

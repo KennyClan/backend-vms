@@ -76,6 +76,13 @@ RP_ID = os.getenv("WEBAUTHN_RP_ID", "localhost")
 RP_NAME = "Vista VMS"
 EXPECTED_ORIGIN = os.getenv("WEBAUTHN_ORIGIN", "http://localhost:5173")
 
+if RP_ID == "localhost" and os.getenv("ENVIRONMENT", "development") == "production":
+    logger.warning(
+        "WEBAUTHN_RP_ID is still 'localhost' in production. "
+        "Set WEBAUTHN_RP_ID to your frontend domain (e.g. frontend-vms-sand.vercel.app) "
+        "or fingerprint registration will fail silently."
+    )
+
 CHALLENGE_TTL_MINUTES = 5
 
 
@@ -217,7 +224,7 @@ async def registration_verify(
         "platform",
         body.nickname,
     )
-    await write_audit(conn, "Staff Login", actor=dict(user_row), detail=f"Biometric device registered: {body.nickname}")
+    await write_audit(conn, "Biometric Registered", actor=dict(user_row), detail=f"Biometric device registered: {body.nickname}")
     return {"detail": "Biometric login enabled for this device"}
 
 

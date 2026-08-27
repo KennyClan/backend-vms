@@ -2,9 +2,11 @@ from enum import Enum
 
 
 class UserRole(str, Enum):
-    admin = "Administrator"
-    guard = "Security Guard"
-    recep = "Receptionist"
+    super_admin = "Super Admin"
+    admin       = "Administrator"
+    recep       = "Receptionist"
+    employee    = "Employee"
+    guard       = "Security Guard"
 
 
 class VisitorStatus(str, Enum):
@@ -24,3 +26,8 @@ class VisitStatus(str, Enum):
     checked_in      = "Checked In"
     checked_out     = "Checked Out"
     rejected        = "Rejected"
+
+
+class DestinationType(str, Enum):
+    normal     = "Normal"
+    restricted = "Restricted"

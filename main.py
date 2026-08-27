@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from database import create_pool, close_pool
-from routers import auth, visitors, visit_requests, audit, analytics, webauthn, staff, restricted, floor_plan
+from routers import auth, visitors, visit_requests, audit, analytics, webauthn, staff, restricted, floor_plan, departments
 import logging
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -90,6 +90,33 @@ async def lifespan(app: FastAPI):
             );
         """)
         logger.info("Restricted area & post tables verified")
+
+        # Departments table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS departments (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                is_restricted BOOLEAN DEFAULT FALSE,
+                restricted_area_id UUID REFERENCES restricted_areas(id) ON DELETE SET NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        logger.info("Departments table verified")
+
+        # Add department_id to staff_users if it doesn't exist
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'staff_users' AND column_name = 'department_id'
+                ) THEN
+                    ALTER TABLE staff_users ADD COLUMN department_id UUID REFERENCES departments(id) ON DELETE SET NULL;
+                END IF;
+            END $$;
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS webauthn_credentials (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -100,7 +127,8 @@ async def lifespan(app: FastAPI):
                 device_type TEXT DEFAULT 'platform',
                 nickname TEXT,
                 last_used_at TIMESTAMPTZ,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(user_id, credential_id)
             );
         """)
         await conn.execute("""
@@ -114,6 +142,33 @@ async def lifespan(app: FastAPI):
             );
         """)
         logger.info("WebAuthn tables verified")
+
+        # Add destination_type, rejection_reason, arrived_at to visit_requests
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'destination_type'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN destination_type TEXT DEFAULT 'Normal';
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'rejection_reason'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN rejection_reason TEXT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'arrived_at'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN arrived_at TIMESTAMPTZ;
+                END IF;
+            END $$;
+        """)
+        logger.info("Visit request schema updated")
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -163,6 +218,7 @@ app.include_router(staff.router)
 app.include_router(staff.posts_router)
 app.include_router(restricted.router)
 app.include_router(floor_plan.router)
+app.include_router(departments.router)
 
 
 @app.get("/health", tags=["Health"])

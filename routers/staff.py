@@ -32,13 +32,16 @@ class StaffCreateIn(BaseModel):
     password: str
     role: UserRole
     post_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
 
 
 class StaffUpdateIn(BaseModel):
     role: UserRole | None = None
     post_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
     is_active: bool | None = None
-    clear_post: bool = False  # set true to unassign (post_id=None means "leave unchanged" otherwise)
+    clear_post: bool = False
+    clear_department: bool = False
 
 
 def _initials(name: str) -> str:
@@ -52,15 +55,17 @@ def _initials(name: str) -> str:
 
 @router.get("")
 async def list_staff(
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     rows = await conn.fetch(
         """
         SELECT su.id, su.name, su.initials, su.email, su.role, su.is_active,
-               su.post_id, p.name AS post_name
+               su.post_id, p.name AS post_name,
+               su.department_id, d.name AS department_name
         FROM staff_users su
         LEFT JOIN posts p ON p.id = su.post_id
+        LEFT JOIN departments d ON d.id = su.department_id
         ORDER BY p.name NULLS LAST, su.name
         """
     )
@@ -70,7 +75,7 @@ async def list_staff(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_staff(
     body: StaffCreateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", body.email.lower())
@@ -82,16 +87,21 @@ async def create_staff(
         if not post_exists:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That post does not exist")
 
+    if body.department_id is not None:
+        dept_exists = await conn.fetchval("SELECT 1 FROM departments WHERE id=$1", body.department_id)
+        if not dept_exists:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That department does not exist")
+
     row = await conn.fetchrow(
         """
-        INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, post_id)
-        VALUES ($1, $2, $3, $4, $5, true, $6)
-        RETURNING id, name, initials, email, role, is_active, post_id
+        INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, post_id, department_id)
+        VALUES ($1, $2, $3, $4, $5, true, $6, $7)
+        RETURNING id, name, initials, email, role, is_active, post_id, department_id
         """,
         body.name, _initials(body.name), body.email.lower(),
-        hash_password(body.password), body.role.value, body.post_id,
+        hash_password(body.password), body.role.value, body.post_id, body.department_id,
     )
-    await write_audit(conn, "Staff Login", actor=current, detail=f"Account created: {body.email} ({body.role.value})")
+    await write_audit(conn, "Staff Created", actor=current, detail=f"Account created: {body.email} ({body.role.value})")
     return dict(row)
 
 
@@ -99,7 +109,7 @@ async def create_staff(
 async def update_staff(
     staff_id: uuid.UUID,
     body: StaffUpdateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     target = await conn.fetchrow("SELECT id FROM staff_users WHERE id=$1", staff_id)
@@ -111,24 +121,33 @@ async def update_staff(
         if not post_exists:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That post does not exist")
 
+    if body.department_id is not None and not body.clear_department:
+        dept_exists = await conn.fetchval("SELECT 1 FROM departments WHERE id=$1", body.department_id)
+        if not dept_exists:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That department does not exist")
+
     new_post_id = None if body.clear_post else body.post_id
+    new_dept_id = None if body.clear_department else body.department_id
 
     row = await conn.fetchrow(
         """
         UPDATE staff_users SET
-            role      = COALESCE($2, role),
-            is_active = COALESCE($3, is_active),
-            post_id   = CASE WHEN $4 THEN NULL WHEN $5::uuid IS NOT NULL THEN $5 ELSE post_id END
+            role          = COALESCE($2, role),
+            is_active     = COALESCE($3, is_active),
+            post_id       = CASE WHEN $4 THEN NULL WHEN $5::uuid IS NOT NULL THEN $5 ELSE post_id END,
+            department_id = CASE WHEN $6 THEN NULL WHEN $7::uuid IS NOT NULL THEN $7 ELSE department_id END
         WHERE id = $1
-        RETURNING id, name, initials, email, role, is_active, post_id
+        RETURNING id, name, initials, email, role, is_active, post_id, department_id
         """,
         staff_id,
         body.role.value if body.role else None,
         body.is_active,
         body.clear_post,
         new_post_id,
+        body.clear_department,
+        new_dept_id,
     )
-    await write_audit(conn, "Staff Login", actor=current, detail=f"Account updated: {row['email']}")
+    await write_audit(conn, "Staff Updated", actor=current, detail=f"Account updated: {row['email']}")
     return dict(row)
 
 
@@ -348,7 +367,7 @@ async def recent_arrivals(
 @posts_router.post("", status_code=status.HTTP_201_CREATED)
 async def create_post(
     body: PostCreateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchval("SELECT 1 FROM posts WHERE name=$1", body.name)
@@ -379,7 +398,7 @@ class PostUpdateIn(BaseModel):
 async def update_post(
     post_id: uuid.UUID,
     body: PostUpdateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id FROM posts WHERE id=$1", post_id)
