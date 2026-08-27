@@ -193,6 +193,22 @@ async def lifespan(app: FastAPI):
             );
         """)
         logger.info("Audit log table verified")
+
+        # Seed default Super Admin if no staff exist
+        existing = await conn.fetchval("SELECT COUNT(*) FROM staff_users")
+        if existing == 0:
+            from utils.auth import hash_password
+            sa_email = os.getenv("SEED_ADMIN_EMAIL", "admin@vistahq.com")
+            sa_pass  = os.getenv("SEED_ADMIN_PASSWORD", "Admin@12345")
+            sa_name  = os.getenv("SEED_ADMIN_NAME", "Super Admin")
+            initials = "".join(w[0] for w in sa_name.split()[:2]).upper() or "SA"
+            await conn.execute(
+                """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
+                   VALUES ($1,$2,$3,$4,'super_admin',true)""",
+                sa_name, initials, sa_email, hash_password(sa_pass),
+            )
+            logger.info(f"Seeded Super Admin: {sa_email}")
+
     yield
     await close_pool()
     logger.info("Database pool closed")
