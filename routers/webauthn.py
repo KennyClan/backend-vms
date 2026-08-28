@@ -61,7 +61,7 @@ from webauthn.helpers.structs import (
 from database import get_conn
 from schemas import TokenOut
 from utils.audit import write_audit
-from utils.auth import create_access_token, verify_pre_auth_token
+from utils.auth import create_access_token, verify_pre_auth_token, resolve_permissions
 from limiter import limiter
 
 router = APIRouter(prefix="/auth/webauthn", tags=["WebAuthn"])
@@ -125,7 +125,7 @@ class AuthenticationVerifyIn(BaseModel):
 
 async def _get_user_row(conn: asyncpg.Connection, user_id: uuid.UUID):
     row = await conn.fetchrow(
-        "SELECT id, name, initials, email, role, is_active FROM staff_users WHERE id=$1",
+        "SELECT id, name, initials, email, role, is_active, permissions FROM staff_users WHERE id=$1",
         user_id,
     )
     if not row or not row["is_active"]:
@@ -331,6 +331,7 @@ async def login_verify(
     )
 
     user = {k: str(v) if isinstance(v, uuid.UUID) else v for k, v in dict(user_row).items()}
+    user["permissions"] = resolve_permissions(user.get("role"), user.get("permissions"))
     token = create_access_token({"sub": str(user_id)})
     await write_audit(conn, "Staff Login", actor=user, detail=f"Biometric step verified: {user_row['email']}")
     return {"access_token": token, "token_type": "bearer", "user": user}

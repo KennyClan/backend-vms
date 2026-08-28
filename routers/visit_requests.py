@@ -193,7 +193,7 @@ async def check_in(
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
     row = await conn.fetchrow(
-        "SELECT visitor_name, visitor_email, host_name, visit_date, approval_status FROM visit_requests WHERE id=$1", request_id
+        "SELECT id, visitor_name, visitor_email, host_name, host_staff_id, visit_date, approval_status, destination_type FROM visit_requests WHERE id=$1", request_id
     )
     if not row:
         raise HTTPException(404, "Request not found")
@@ -205,6 +205,47 @@ async def check_in(
     )
     await write_audit(conn, "Checked In", actor=current, visit_request_id=request_id,
                       visitor_name=row["visitor_name"], detail=f"Badge: {body.badge_number}")
+
+    # Auto-grant restricted-area access once a visitor destined for a
+    # restricted department actually checks in, so the guard can immediately
+    # issue a restricted badge at the Security Desk.
+    dest = row["destination_type"]
+    dept_area = None
+    if row["host_staff_id"]:
+        dept_info = await conn.fetchrow(
+            """
+            SELECT d.is_restricted, d.restricted_area_id
+            FROM staff_users su
+            JOIN departments d ON d.id = su.department_id
+            WHERE su.id = $1
+            """,
+            row["host_staff_id"],
+        )
+        if dept_info and dept_info["is_restricted"]:
+            if dest != "Restricted":
+                dest = "Restricted"
+                await conn.execute(
+                    "UPDATE visit_requests SET destination_type='Restricted' WHERE id=$1",
+                    request_id,
+                )
+            dept_area = dept_info["restricted_area_id"]
+    if dest == "Restricted" and dept_area:
+        existing = await conn.fetchval(
+            "SELECT 1 FROM restricted_access WHERE visit_request_id=$1 AND restricted_area_id=$2",
+            request_id, dept_area,
+        )
+        if not existing:
+            await conn.execute(
+                """INSERT INTO restricted_access (visit_request_id, restricted_area_id, status, approved_by, granted_at)
+                   VALUES ($1, $2, 'Pending', $3, NOW())""",
+                request_id, dept_area, uuid.UUID(str(current["id"])),
+            )
+            await write_audit(
+                conn, "Restricted Access Auto-Granted", actor=current,
+                visit_request_id=request_id, visitor_name=row["visitor_name"],
+                detail="Auto-granted at check-in for restricted destination",
+            )
+
     if row["visitor_email"]:
         asyncio.create_task(send_status_update_email(
             to_email     = row["visitor_email"],
@@ -252,8 +293,12 @@ async def get_restricted_access(
     current:    dict               = Depends(get_current_user),
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
-    """Check if a visit request has pre-approved restricted area access."""
-    req = await conn.fetchrow("SELECT id FROM visit_requests WHERE id=$1", request_id)
+    """Check if a visit request has restricted area access — either a real
+    grant row, or a recognised restricted destination (host in a restricted
+    department) that hasn't been granted yet."""
+    req = await conn.fetchrow(
+        "SELECT id, destination_type, host_staff_id FROM visit_requests WHERE id=$1", request_id
+    )
     if not req:
         raise HTTPException(404, "Request not found")
 
@@ -268,6 +313,26 @@ async def get_restricted_access(
         """,
         request_id,
     )
+    if not row and req["destination_type"] == "Restricted" and req["host_staff_id"]:
+        area = await conn.fetchrow(
+            """
+            SELECT ra.id, ra.name, ra.floor
+            FROM staff_users su
+            JOIN departments d ON d.id = su.department_id
+            JOIN restricted_areas ra ON ra.id = d.restricted_area_id
+            WHERE su.id = $1 AND d.is_restricted = TRUE AND ra.is_active = TRUE
+            """,
+            req["host_staff_id"],
+        )
+        if area:
+            return {
+                "has_restricted_access": True,
+                "restricted_area_id": area["id"],
+                "area_name": area["name"],
+                "floor": area["floor"],
+                "status": "Pending",
+                "restricted_badge": None,
+            }
     if not row:
         return {"has_restricted_access": False}
 

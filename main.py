@@ -194,6 +194,31 @@ async def lifespan(app: FastAPI):
         """)
         logger.info("Audit log table verified")
 
+        # Module-based access control: add permissions column to staff_users
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'staff_users' AND column_name = 'permissions'
+                ) THEN
+                    ALTER TABLE staff_users ADD COLUMN permissions JSONB NOT NULL DEFAULT '{}';
+                END IF;
+            END $$;
+        """)
+        # Backfill role defaults for any account with unset permissions
+        from models import DEFAULT_MODULES_BY_ROLE
+        import json as _json
+        for _role, _modules in DEFAULT_MODULES_BY_ROLE.items():
+            await conn.execute(
+                """UPDATE staff_users
+                   SET permissions = $1::jsonb
+                   WHERE role = $2::user_role
+                     AND (permissions IS NULL OR permissions::text IN ('', '{}', 'null'))""",
+                _json.dumps(list(_modules)), _role,
+            )
+        logger.info("Staff module permissions verified")
+
         # Ensure email is unique on staff_users (needed for ON CONFLICT)
         await conn.execute("""
             DO $$ BEGIN
@@ -220,11 +245,13 @@ async def lifespan(app: FastAPI):
             exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
             if not exists:
                 initials = "".join(w[0] for w in name.split()[:2]).upper()
+                default_perms = DEFAULT_MODULES_BY_ROLE.get(name, [])
                 try:
                     await conn.execute(
-                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
-                           VALUES ($1,$2,$3,$4,$5::user_role,$6)""",
+                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
+                           VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
                         name, initials, email, hash_password(password), name, True,
+                        _json.dumps(default_perms),
                     )
                     seeded += 1
                     logger.info(f"Seeded: {name} <{email}>")
@@ -301,6 +328,8 @@ async def seed_accounts():
             except Exception as e:
                 errors.append(f"enum {val}: {e}")
 
+        import json as _json
+        from models import DEFAULT_MODULES_BY_ROLE
         accounts = [
             ("Super Admin",    "superadmin@vistahq.com","Admin@12345"),
             ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
@@ -315,9 +344,10 @@ async def seed_accounts():
                 initials = "".join(w[0] for w in name.split()[:2]).upper()
                 try:
                     await conn.execute(
-                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active)
-                           VALUES ($1,$2,$3,$4,$5::user_role,$6)""",
+                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
+                           VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
                         name, initials, email, hash_password(password), name, True,
+                        _json.dumps(DEFAULT_MODULES_BY_ROLE.get(name, [])),
                     )
                     created.append(email)
                 except Exception as e:

@@ -2,14 +2,15 @@ import asyncpg
 from fastapi import APIRouter, Depends
 from database import get_conn
 from models import UserRole
-from utils.auth import require_roles
+from utils.auth import require_roles, require_modules
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 
 @router.get("/summary")
 async def analytics_summary(
-    _:    dict               = Depends(require_roles(UserRole.admin, UserRole.recep)),
+    _:    dict               = Depends(require_roles(UserRole.admin, UserRole.recep, UserRole.super_admin)),
+    __:   dict               = Depends(require_modules("analytics")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     summary = await conn.fetchrow(

@@ -31,3 +31,46 @@ class VisitStatus(str, Enum):
 class DestinationType(str, Enum):
     normal     = "Normal"
     restricted = "Restricted"
+
+
+# ── Module access control ─────────────────────────────────────────
+# Every navigable area/module of the app. A staff account's `permissions`
+# (JSONB list on staff_users) decides which of these it can open. Anything
+# not listed here cannot be granted.
+ALL_MODULES = (
+    "dashboard",
+    "visitors",
+    "requests",
+    "security",
+    "myroom",
+    "analytics",
+    "audit",
+    "restricted",
+    "staff",
+    "departments",
+    "floorplan",
+    "visitor-history",
+)
+
+# Default module set per role. Used when an account has no explicit
+# permissions yet (seed/backfill) and to reset access when a role changes.
+# Super Admin is intentionally non-editable (full access).
+DEFAULT_MODULES_BY_ROLE = {
+    UserRole.super_admin.value: [
+        "dashboard", "visitors", "requests", "security", "myroom",
+        "analytics", "audit", "restricted", "staff", "departments", "floorplan",
+    ],
+    UserRole.admin.value: [
+        "dashboard", "visitors", "requests", "security",
+        "analytics", "audit", "restricted", "staff", "departments", "floorplan",
+    ],
+    UserRole.recep.value: [
+        "dashboard", "visitors", "requests", "analytics", "audit", "floorplan",
+    ],
+    UserRole.guard.value: [
+        "dashboard", "myroom", "visitors", "security", "restricted",
+    ],
+    UserRole.employee.value: [
+        "dashboard", "requests", "visitor-history",
+    ],
+}

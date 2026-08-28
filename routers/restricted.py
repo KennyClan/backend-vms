@@ -21,7 +21,7 @@ import asyncpg
 
 from database import get_conn
 from models import UserRole
-from utils.auth import require_roles, get_current_user
+from utils.auth import require_roles, get_current_user, require_modules
 from utils.audit import write_audit
 
 router = APIRouter(prefix="/restricted-areas", tags=["Restricted Areas"])
@@ -57,6 +57,7 @@ class ExitScanIn(BaseModel):
 @router.get("")
 async def list_areas(
     current: dict               = Depends(get_current_user),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     rows = await conn.fetch(
@@ -78,6 +79,7 @@ async def list_areas(
 async def create_area(
     body:    AreaIn,
     current: dict               = Depends(require_roles(UserRole.admin, UserRole.recep)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     # Floor plan objects default to a generic name ("Room", "Restricted")
@@ -109,6 +111,7 @@ async def create_area(
 async def deactivate_area(
     area_id: uuid.UUID,
     current: dict               = Depends(require_roles(UserRole.admin)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     await conn.execute(
@@ -125,6 +128,7 @@ async def grant_access(
     area_id: uuid.UUID,
     body:    GrantIn,
     current: dict               = Depends(require_roles(UserRole.admin)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     # Verify the visit request is approved
@@ -172,6 +176,7 @@ async def grant_access(
 async def issue_badge(
     body:    IssueBadgeIn,
     current: dict               = Depends(require_roles(UserRole.admin, UserRole.guard)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     # Look up visit request by QR ref
@@ -192,7 +197,27 @@ async def issue_badge(
         req["id"], body.restricted_area_id,
     )
     if not access:
-        raise HTTPException(404, "No restricted access grant found for this visitor and area.")
+        # Auto-create the grant for visitors destined for a restricted area
+        # (derived from the host's department). Covers the Security Desk flow
+        # where the restriction is recognised from the request before any
+        # manual admin grant row exists.
+        area_ok = await conn.fetchval(
+            """SELECT 1
+               FROM staff_users su
+               JOIN departments d ON d.id = su.department_id
+               WHERE su.id = $1 AND d.is_restricted = TRUE
+                 AND d.restricted_area_id = $2""",
+            req["host_staff_id"], body.restricted_area_id,
+        )
+        if req["destination_type"] != "Restricted" or not area_ok:
+            raise HTTPException(404, "No restricted access grant found for this visitor and area.")
+        access = await conn.fetchrow(
+            """
+            INSERT INTO restricted_access (visit_request_id, restricted_area_id, restricted_badge)
+            VALUES ($1, $2, '') RETURNING *
+            """,
+            req["id"], body.restricted_area_id,
+        )
     if access["status"] not in ("Pending",):
         raise HTTPException(400, f"Badge already issued (status: {access['status']}).")
 
@@ -230,6 +255,7 @@ async def issue_badge(
 async def confirm_entry(
     body:    BadgeScanIn,
     current: dict               = Depends(require_roles(UserRole.admin, UserRole.guard)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     access = await conn.fetchrow(
@@ -268,6 +294,7 @@ async def confirm_entry(
 async def confirm_exit(
     body:    ExitScanIn,
     current: dict               = Depends(require_roles(UserRole.admin, UserRole.guard)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     access = await conn.fetchrow(
@@ -300,6 +327,7 @@ async def confirm_exit(
 async def list_occupants(
     area_id: uuid.UUID,
     current: dict               = Depends(require_roles(UserRole.admin)),
+    _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     rows = await conn.fetch(

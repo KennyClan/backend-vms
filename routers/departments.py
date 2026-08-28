@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from database import get_conn
 from models import UserRole
-from utils.auth import require_roles
+from utils.auth import require_roles, require_modules
 from utils.audit import write_audit
 
 router = APIRouter(prefix="/departments", tags=["Departments"])
@@ -39,6 +39,7 @@ class DepartmentUpdateIn(BaseModel):
 @router.get("")
 async def list_departments(
     current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
+    _m:      dict = Depends(require_modules("departments")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     rows = await conn.fetch(
@@ -61,6 +62,7 @@ async def list_departments(
 async def create_department(
     body: DepartmentCreateIn,
     current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
+    _m:      dict = Depends(require_modules("departments")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchval("SELECT 1 FROM departments WHERE name=$1", body.name)
@@ -92,6 +94,7 @@ async def update_department(
     department_id: uuid.UUID,
     body: DepartmentUpdateIn,
     current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
+    _m:      dict = Depends(require_modules("departments")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id FROM departments WHERE id=$1", department_id)
@@ -128,6 +131,7 @@ async def update_department(
 async def delete_department(
     department_id: uuid.UUID,
     current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
+    _m:      dict = Depends(require_modules("departments")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id, name FROM departments WHERE id=$1", department_id)
@@ -147,6 +151,7 @@ async def delete_department(
 async def list_department_members(
     department_id: uuid.UUID,
     current: dict = Depends(require_roles(UserRole.super_admin, UserRole.admin)),
+    _m:      dict = Depends(require_modules("departments")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     dept = await conn.fetchrow("SELECT id FROM departments WHERE id=$1", department_id)

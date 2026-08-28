@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from database import get_conn
-from utils.auth import require_roles
+from utils.auth import require_roles, require_modules
 from models import UserRole
 import asyncpg
 
@@ -63,6 +63,7 @@ def _row_to_dict(row):
 @router.get("")
 async def list_floors(
     current: dict = Depends(require_roles(UserRole.admin, UserRole.guard, UserRole.recep)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     rows = await conn.fetch("SELECT * FROM floors ORDER BY floor_number ASC")
@@ -73,6 +74,7 @@ async def list_floors(
 async def create_floor(
     body: FloorCreateIn,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchval(
@@ -92,6 +94,7 @@ async def update_floor(
     floor_id: uuid.UUID,
     body: FloorUpdateIn,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id FROM floors WHERE id=$1", floor_id)
@@ -117,6 +120,7 @@ async def update_floor(
 async def delete_floor(
     floor_id: uuid.UUID,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id FROM floors WHERE id=$1", floor_id)
@@ -133,6 +137,7 @@ async def delete_floor(
 async def list_objects(
     floor_id: uuid.UUID,
     current: dict = Depends(require_roles(UserRole.admin, UserRole.guard, UserRole.recep)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     rows = await conn.fetch(
@@ -147,6 +152,7 @@ async def create_object(
     floor_id: uuid.UUID,
     body: ObjectCreateIn,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     floor_exists = await conn.fetchval("SELECT 1 FROM floors WHERE id=$1", floor_id)
@@ -168,6 +174,7 @@ async def update_object(
     object_id: uuid.UUID,
     body: ObjectUpdateIn,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id FROM floor_plan_objects WHERE id=$1", object_id)
@@ -197,6 +204,7 @@ async def update_object(
 async def delete_object(
     object_id: uuid.UUID,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT id FROM floor_plan_objects WHERE id=$1", object_id)
@@ -210,6 +218,7 @@ async def delete_object(
 async def duplicate_object(
     object_id: uuid.UUID,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     existing = await conn.fetchrow("SELECT * FROM floor_plan_objects WHERE id=$1", object_id)
@@ -233,6 +242,7 @@ async def bulk_save_objects(
     floor_id: uuid.UUID,
     body: BulkSaveIn,
     current: dict = Depends(require_roles(UserRole.admin)),
+    _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     floor_exists = await conn.fetchval("SELECT 1 FROM floors WHERE id=$1", floor_id)

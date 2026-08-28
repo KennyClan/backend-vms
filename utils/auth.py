@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -7,7 +8,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from database import get_conn
-from models import UserRole
+from models import UserRole, ALL_MODULES, DEFAULT_MODULES_BY_ROLE
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -70,6 +71,33 @@ def verify_pre_auth_token(token: str) -> str:
         raise cred_exc
 
 
+def resolve_permissions(role: str, raw) -> list[str]:
+    """Return the effective module list for a staff account.
+
+    Stored `permissions` is authoritative when present; otherwise fall back
+    to the role's defaults (covers freshly seeded accounts and legacy rows).
+    `dashboard` can never be removed. Super Admin is locked to the full set —
+    no stored value can strip their access.
+    """
+    if role == "Super Admin":
+        return list(DEFAULT_MODULES_BY_ROLE.get(role, []))
+    if raw is None:
+        return list(DEFAULT_MODULES_BY_ROLE.get(role, []))
+    parsed = raw
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            parsed = None
+    if not isinstance(parsed, list) or not parsed:
+        # Empty/''/'{}' means "not customized yet" -> role defaults
+        return list(DEFAULT_MODULES_BY_ROLE.get(role, []))
+    perms = [m for m in parsed if m in ALL_MODULES]
+    if "dashboard" not in perms:
+        perms = ["dashboard"] + perms
+    return perms
+
+
 async def get_current_user(
     token: str = Depends(oauth2),
     conn:  asyncpg.Connection = Depends(get_conn),
@@ -83,17 +111,36 @@ async def get_current_user(
     except JWTError:
         raise cred_exc
     row = await conn.fetchrow(
-        "SELECT id, name, initials, email, role, is_active FROM staff_users WHERE id=$1",
+        "SELECT id, name, initials, email, role, is_active, permissions FROM staff_users WHERE id=$1",
         uuid.UUID(user_id),
     )
     if not row or not row["is_active"]:
         raise cred_exc
-    return dict(row)
+    user = dict(row)
+    user["permissions"] = resolve_permissions(user["role"], user.get("permissions"))
+    return user
 
 
 def require_roles(*roles: UserRole):
     async def checker(user: dict = Depends(get_current_user)):
         if user["role"] not in [r.value for r in roles]:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return user
+    return checker
+
+
+def require_modules(*modules: str):
+    """403 guard for module access. The user's effective module list must
+    contain every module required by the endpoint."""
+    async def checker(user: dict = Depends(get_current_user)):
+        # Defensive: tolerate raw JSON-string/None permission values even if
+        # the caller bypassed get_current_user's resolution.
+        user_perms = set(resolve_permissions(user.get("role"), user.get("permissions")))
+        missing = [m for m in modules if m not in user_perms]
+        if missing:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=f"Access to this module is not enabled for your account ({', '.join(missing)})",
+            )
         return user
     return checker
