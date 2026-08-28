@@ -68,19 +68,41 @@ router = APIRouter(prefix="/auth/webauthn", tags=["WebAuthn"])
 
 # --- Relying Party config -----------------------------------------------
 # RP_ID must be the bare domain your frontend is served from (no scheme, no
-# port). EXPECTED_ORIGIN is the full origin. Both come from env vars so
-# nothing needs to change in code between local dev and your Vercel deploy —
-# just set WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN on Render alongside CORS_ORIGINS,
-# using the same Vercel URL you already put in CORS_ORIGINS.
-RP_ID = os.getenv("WEBAUTHN_RP_ID", "localhost")
+# port). EXPECTED_ORIGIN is the full origin.
+#
+# Resolution order:
+#   1. WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN env vars (explicit, always win).
+#   2. Auto-derived from the first non-localhost origin in CORS_ORIGINS —
+#      the frontend's production origin — so fingerprint/Face ID keeps
+#      working without extra env vars, as long as CORS_ORIGINS is set.
+#   3. localhost fallbacks for local development.
+import os
+from urllib.parse import urlparse
+
+RP_ID = os.getenv("WEBAUTHN_RP_ID", "")
+EXPECTED_ORIGIN = os.getenv("WEBAUTHN_ORIGIN", "")
+if not RP_ID or not EXPECTED_ORIGIN:
+    for _origin in [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]:
+        _parsed = urlparse(_origin)
+        if _parsed.scheme in ("http", "https") and _parsed.hostname and _parsed.hostname not in ("localhost", "127.0.0.1"):
+            if not EXPECTED_ORIGIN:
+                EXPECTED_ORIGIN = _origin
+            if not RP_ID:
+                RP_ID = _parsed.hostname
+            break
+if not RP_ID:
+    RP_ID = "localhost"
+if not EXPECTED_ORIGIN:
+    EXPECTED_ORIGIN = "http://localhost:5173"
 RP_NAME = "Vista VMS"
-EXPECTED_ORIGIN = os.getenv("WEBAUTHN_ORIGIN", "http://localhost:5173")
+logger.info("WebAuthn RP_ID=%s EXPECTED_ORIGIN=%s", RP_ID, EXPECTED_ORIGIN)
 
 if RP_ID == "localhost" and os.getenv("ENVIRONMENT", "development") == "production":
     logger.warning(
         "WEBAUTHN_RP_ID is still 'localhost' in production. "
-        "Set WEBAUTHN_RP_ID to your frontend domain (e.g. frontend-vms-sand.vercel.app) "
-        "or fingerprint registration will fail silently."
+        "Set CORS_ORIGINS to your frontend URL (e.g. https://frontend-vms-sand.vercel.app) "
+        "on Render, or set WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN explicitly — "
+        "otherwise fingerprint registration will fail with 'cancelled/timed out'."
     )
 
 CHALLENGE_TTL_MINUTES = 5
