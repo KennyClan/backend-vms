@@ -112,10 +112,16 @@ class PreAuthIn(BaseModel):
     pre_auth_token: str
 
 
+class RegistrationOptionsIn(BaseModel):
+    pre_auth_token: str
+    replace: bool = False
+
+
 class RegistrationVerifyIn(BaseModel):
     pre_auth_token: str
     credential: dict
     nickname: str | None = None
+    replace: bool = False
 
 
 class AuthenticationVerifyIn(BaseModel):
@@ -175,7 +181,7 @@ async def _pop_challenge(conn: asyncpg.Connection, user_id: uuid.UUID, purpose: 
 @limiter.limit("5/minute")
 async def registration_options(
     request: Request,
-    body: PreAuthIn,
+    body: RegistrationOptionsIn,
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     user_id = uuid.UUID(verify_pre_auth_token(body.pre_auth_token))
@@ -186,16 +192,24 @@ async def registration_options(
         user_id,
     )
 
+    # replace=True is the "re-register / I can't sign in anymore" path: we
+    # deliberately do NOT exclude already-registered authenticators, so the
+    # same device can register afresh even if its old credential row is stale
+    # or orphaned (the exact cause of "Invalid credential"/"Unrecognized
+    # device" lockouts after a database restore). The old rows are deleted in
+    # /register/verify once the new credential is created.
+    exclude = [] if body.replace else [
+        PublicKeyCredentialDescriptor(id=base64url_to_bytes(r["credential_id"]))
+        for r in existing
+    ]
+
     options = generate_registration_options(
         rp_id=RP_ID,
         rp_name=RP_NAME,
         user_id=str(user_id).encode(),
         user_name=user_row["email"],
         user_display_name=user_row["name"],
-        exclude_credentials=[
-            PublicKeyCredentialDescriptor(id=base64url_to_bytes(r["credential_id"]))
-            for r in existing
-        ],
+        exclude_credentials=exclude,
         authenticator_selection=AuthenticatorSelectionCriteria(
             resident_key=ResidentKeyRequirement.PREFERRED,
             user_verification=UserVerificationRequirement.REQUIRED,  # forces biometric/PIN, not just "device present"
@@ -233,6 +247,14 @@ async def registration_verify(
         logger.exception("WebAuthn registration verify failed: %s", exc)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Could not verify this device's response")
 
+    if body.replace:
+        # Fresh start — clear any stale credential rows for this user so the
+        # newly created credential is the only one they can sign in with.
+        await conn.execute(
+            "DELETE FROM webauthn_credentials WHERE user_id=$1",
+            user_id,
+        )
+
     await conn.execute(
         """
         INSERT INTO webauthn_credentials
@@ -246,7 +268,7 @@ async def registration_verify(
         "platform",
         body.nickname,
     )
-    await write_audit(conn, "Biometric Registered", actor=dict(user_row), detail=f"Biometric device registered: {body.nickname}")
+    await write_audit(conn, "Biometric Registered", actor=dict(user_row), detail=f"Biometric device registered: {body.nickname}" + (" (re-registered)" if body.replace else ""))
     return {"detail": "Biometric login enabled for this device"}
 
 
