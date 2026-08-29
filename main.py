@@ -233,24 +233,33 @@ async def lifespan(app: FastAPI):
 
         # Seed default accounts (skip any that already exist)
         from utils.auth import hash_password
+        # (display_name, email, password, role) — the Employee account is
+        # displayed as a real person ("Lim Kenny") so visitors who type a
+        # host name see a person, not the role word "Employee".
         accounts = [
-            ("Super Admin",    "superadmin@vistahq.com","Admin@12345"),
-            ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
-            ("Receptionist",   "reception@vistahq.com", "Recep@12345"),
-            ("Security Guard", "security@vistahq.com",  "Guard@12345"),
-            ("Employee",       "employee@vistahq.com",  "Employee@12345"),
+            ("Super Admin",    "superadmin@vistahq.com","Admin@12345",  "Super Admin"),
+            ("Administrator",  "admin2@vistahq.com",    "Admin@12345",  "Administrator"),
+            ("Receptionist",   "reception@vistahq.com", "Recep@12345",  "Receptionist"),
+            ("Security Guard", "security@vistahq.com",  "Guard@12345",  "Security Guard"),
+            ("Lim Kenny",      "employee@vistahq.com",  "Employee@12345","Employee"),
         ]
+        # Rename any legacy "Employee" display name to "Lim Kenny" so the
+        # rename also lands on databases seeded before this change.
+        await conn.execute(
+            "UPDATE staff_users SET name='Lim Kenny', initials='LK' "
+            "WHERE email='employee@vistahq.com' AND name='Employee'"
+        )
         seeded = 0
-        for name, email, password in accounts:
+        for name, email, password, role in accounts:
             exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
             if not exists:
                 initials = "".join(w[0] for w in name.split()[:2]).upper()
-                default_perms = DEFAULT_MODULES_BY_ROLE.get(name, [])
+                default_perms = DEFAULT_MODULES_BY_ROLE.get(role, [])
                 try:
                     await conn.execute(
                         """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
                            VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
-                        name, initials, email, hash_password(password), name, True,
+                        name, initials, email, hash_password(password), role, True,
                         _json.dumps(default_perms),
                     )
                     seeded += 1
@@ -332,14 +341,14 @@ async def seed_accounts():
         import json as _json
         from models import DEFAULT_MODULES_BY_ROLE
         accounts = [
-            ("Super Admin",    "superadmin@vistahq.com","Admin@12345"),
-            ("Administrator",  "admin2@vistahq.com",    "Admin@12345"),
-            ("Receptionist",   "reception@vistahq.com", "Recep@12345"),
-            ("Security Guard", "security@vistahq.com",  "Guard@12345"),
-            ("Employee",       "employee@vistahq.com",  "Employee@12345"),
+            ("Super Admin",    "superadmin@vistahq.com","Admin@12345",  "Super Admin"),
+            ("Administrator",  "admin2@vistahq.com",    "Admin@12345",  "Administrator"),
+            ("Receptionist",   "reception@vistahq.com", "Recep@12345",  "Receptionist"),
+            ("Security Guard", "security@vistahq.com",  "Guard@12345",  "Security Guard"),
+            ("Lim Kenny",      "employee@vistahq.com",  "Employee@12345","Employee"),
         ]
         created = []
-        for name, email, password in accounts:
+        for name, email, password, role in accounts:
             exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
             if not exists:
                 initials = "".join(w[0] for w in name.split()[:2]).upper()
@@ -347,8 +356,8 @@ async def seed_accounts():
                     await conn.execute(
                         """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
                            VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
-                        name, initials, email, hash_password(password), name, True,
-                        _json.dumps(DEFAULT_MODULES_BY_ROLE.get(name, [])),
+                        name, initials, email, hash_password(password), role, True,
+                        _json.dumps(DEFAULT_MODULES_BY_ROLE.get(role, [])),
                     )
                     created.append(email)
                 except Exception as e:
