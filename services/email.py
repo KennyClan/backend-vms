@@ -1,50 +1,62 @@
 import os
 import base64
-import smtplib
 import logging
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
 
 from dotenv import load_dotenv
+import httpx
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# --- Gmail SMTP config ---------------------------------------------------
-# Use an App Password, NOT your regular Gmail password.
-# Generate one at: https://myaccount.google.com/apppasswords
-# (Requires 2FA to be enabled on your Google account.)
-MAIL_FROM      = os.getenv("MAIL_FROM", "")
-MAIL_PASSWORD  = os.getenv("MAIL_PASSWORD", "")
-MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "Vista VMS")
+# --- EmailJS config ------------------------------------------------------
+# Emails go out through EmailJS's own servers, so hosting providers that
+# block outbound SMTP (e.g. Render) can't stop delivery. Everything that
+# makes the email pretty still lives in the HTML builders below — EmailJS
+# is only a transport: the dashboard template is Subject={{subject}},
+# To Email={{to_email}}, Content={{html}}.
+EMAILJS_SERVICE_ID    = os.getenv("EMAILJS_SERVICE_ID", "")
+EMAILJS_TEMPLATE_QR   = os.getenv("EMAILJS_TEMPLATE_QR_ID", "")
+EMAILJS_TEMPLATE_ALT  = os.getenv("EMAILJS_TEMPLATE_STATUS_ID", "")  # optional; falls back to QR template
+EMAILJS_PUBLIC_KEY    = os.getenv("EMAILJS_PUBLIC_KEY", "")
+EMAILJS_PRIVATE_KEY   = os.getenv("EMAILJS_PRIVATE_KEY", "")
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587  # TLS (STARTTLS)
+EMAILJS_URL = "https://api.emailjs.com/api/v1.0/email/send"
 
 
-def _smtp_send(msg: MIMEMultipart) -> bool:
-    """Open a fresh SMTP connection, send msg, close it. Returns True on success."""
-    if not MAIL_FROM or not MAIL_PASSWORD:
-        logger.error("[Email] MAIL_FROM or MAIL_PASSWORD is not set in .env")
+async def _emailjs_send(to_email: str, subject: str, html: str, template_id: str = "") -> bool:
+    """POST the rendered email to EmailJS REST API. Returns True on success."""
+    template_id = template_id or EMAILJS_TEMPLATE_QR
+    if not (to_email and html):
+        logger.error("[Email] Missing recipient or body")
         return False
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(MAIL_FROM, MAIL_PASSWORD)
-            server.sendmail(MAIL_FROM, msg["To"], msg.as_string())
-        return True
-    except smtplib.SMTPAuthenticationError:
+    if not (EMAILJS_SERVICE_ID and EMAILJS_PUBLIC_KEY and EMAILJS_PRIVATE_KEY and template_id):
         logger.error(
-            "[Email] Gmail authentication failed. "
-            "Make sure you're using an App Password, not your regular Gmail password. "
-            "Generate one at https://myaccount.google.com/apppasswords"
+            "[Email] EmailJS not fully configured — set EMAILJS_SERVICE_ID, "
+            "EMAILJS_PUBLIC_KEY, EMAILJS_PRIVATE_KEY and a TEMPLATE_*_ID in .env"
         )
         return False
+
+    payload = {
+        "service_id": EMAILJS_SERVICE_ID,
+        "template_id": template_id,
+        "user_id": EMAILJS_PUBLIC_KEY,
+        "accessToken": EMAILJS_PRIVATE_KEY,
+        "template_params": {
+            "to_email": to_email,
+            "subject": subject,
+            "html": html,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(EMAILJS_URL, json=payload)
+        if resp.status_code == 200:
+            return True
+        logger.error(f"[Email] EmailJS send failed: {resp.status_code} {resp.text[:500]}")
+        return False
     except Exception as e:
-        logger.error(f"[Email] Failed to send: {e}")
+        logger.error(f"[Email] EmailJS request error: {e}")
         return False
 
 
@@ -69,7 +81,7 @@ def _generate_qr_png(data: str) -> bytes:
         )
 
 
-def _build_qr_html(visitor_name, host_name, visit_date, expected_time, purpose, qr_ref):
+def _build_qr_html(visitor_name, host_name, visit_date, expected_time, purpose, qr_ref, qr_img_src=""):
     return f"""\
 <!DOCTYPE html>
 <html>
@@ -120,7 +132,7 @@ def _build_qr_html(visitor_name, host_name, visit_date, expected_time, purpose, 
 
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr><td align="center" style="padding:20px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;">
-              <img src="cid:qrcode" width="160" height="160" alt="QR Code" style="display:block;"/>
+              <img src="{qr_img_src}" width="160" height="160" alt="QR Code" style="display:block;"/>
               <p style="margin:12px 0 0;font-size:12px;color:#64748b;">Scan this QR code at the security desk</p>
               <p style="margin:4px 0 0;font-family:monospace;font-size:13px;font-weight:700;color:#2563eb;">{qr_ref}</p>
             </td></tr>
@@ -154,38 +166,14 @@ async def send_qr_pass_email(
     purpose: str,
     qr_ref: str,
 ) -> bool:
-    """Send QR pass email via Gmail SMTP. Returns True on success."""
+    """Send QR pass email via EmailJS (keeps the original HTML template). Returns True on success."""
     qr_data = f"{qr_ref}|{visitor_name}|{visit_date}|{host_name}"
     qr_png  = _generate_qr_png(qr_data)
+    qr_img  = "data:image/png;base64," + base64.b64encode(qr_png).decode("ascii")
 
-    msg = MIMEMultipart("related")
-    msg["Subject"] = f"✅ Your Visit Pass — {visit_date} | Vista VMS"
-    msg["From"]    = f"{MAIL_FROM_NAME} <{MAIL_FROM}>"
-    msg["To"]      = to_email
-
-    # HTML body in an "alternative" wrapper (plain-text fallback + HTML)
-    alternative = MIMEMultipart("alternative")
-    plain = (
-        f"Hello {visitor_name},\n\n"
-        f"Your visit has been approved.\n"
-        f"Visiting: {host_name}\nDate: {visit_date}\nTime: {expected_time or 'Flexible'}\n"
-        f"Purpose: {purpose}\nReference: {qr_ref}\n\n"
-        f"Please present this reference number at the security desk.\n\nVista VMS"
-    )
-    alternative.attach(MIMEText(plain, "plain"))
-    alternative.attach(MIMEText(
-        _build_qr_html(visitor_name, host_name, visit_date, expected_time, purpose, qr_ref),
-        "html",
-    ))
-    msg.attach(alternative)
-
-    # Embed QR code image (inline, referenced as cid:qrcode in the HTML)
-    img = MIMEImage(qr_png, _subtype="png")
-    img.add_header("Content-ID", "<qrcode>")
-    img.add_header("Content-Disposition", "inline", filename="qr_pass.png")
-    msg.attach(img)
-
-    return _smtp_send(msg)
+    html    = _build_qr_html(visitor_name, host_name, visit_date, expected_time, purpose, qr_ref, qr_img)
+    subject = f"✅ Your Visit Pass — {visit_date} | Vista VMS"
+    return await _emailjs_send(to_email, subject, html, EMAILJS_TEMPLATE_QR)
 
 
 # --- Status update email -------------------------------------------------
@@ -251,20 +239,14 @@ async def send_status_update_email(
     status: str,
     extra_note: str = "",
 ) -> bool:
-    """Send a status-change notification (Rejected / Checked In / Checked Out) via Gmail SMTP."""
+    """Send a status-change notification (Rejected / Checked In / Checked Out) via EmailJS.
+
+    Reuses the QR template when no dedicated status template is configured —
+    both templates are just {{subject}} + {{html}}, so this works either way.
+    """
     prefix = {"Rejected": "❌", "Checked In": "🟢", "Checked Out": "⬜"}.get(status, "ℹ️")
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"{prefix} Visit Update — {status} | Vista VMS"
-    msg["From"]    = f"{MAIL_FROM_NAME} <{MAIL_FROM}>"
-    msg["To"]      = to_email
-
-    plain = (
-        f"Hello {visitor_name},\n\n"
-        f"Your visit to see {host_name} on {visit_date} {_STATUS_META.get(status, {}).get('headline', f'is now {status}')}.\n"
-        f"{extra_note}\n\nVista VMS"
-    )
-    msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(_build_status_html(visitor_name, host_name, visit_date, status, extra_note), "html"))
-
-    return _smtp_send(msg)
+    subject = f"{prefix} Visit Update — {status} | Vista VMS"
+    html    = _build_status_html(visitor_name, host_name, visit_date, status, extra_note)
+    template_id = EMAILJS_TEMPLATE_ALT or EMAILJS_TEMPLATE_QR
+    return await _emailjs_send(to_email, subject, html, template_id)
