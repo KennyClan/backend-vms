@@ -9,7 +9,7 @@ from schemas import VisitRequestIn, VisitRequestOut, CheckInIn, ApprovalIn, Empl
 from models import UserRole, ApprovalStatus
 from utils.auth import get_current_user, require_roles
 from utils.audit import write_audit
-from services.email import send_qr_pass_email, send_status_update_email
+from services.email import send_qr_pass_email, send_status_update_email, send_wayfinding_email
 from limiter import limiter
 import asyncio
 
@@ -193,7 +193,7 @@ async def check_in(
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
     row = await conn.fetchrow(
-        "SELECT id, visitor_name, visitor_email, host_name, host_staff_id, visit_date, approval_status, destination_type FROM visit_requests WHERE id=$1", request_id
+        "SELECT id, visitor_name, visitor_email, host_name, host_staff_id, visit_date, qr_ref, approval_status, destination_type, destination_post_id FROM visit_requests WHERE id=$1", request_id
     )
     if not row:
         raise HTTPException(404, "Request not found")
@@ -247,13 +247,28 @@ async def check_in(
             )
 
     if row["visitor_email"]:
-        asyncio.create_task(send_status_update_email(
-            to_email     = row["visitor_email"],
-            visitor_name = row["visitor_name"],
-            host_name    = row["host_name"],
-            visit_date   = str(row["visit_date"]),
-            status       = "Checked In",
-        ))
+        destination = None
+        if row["destination_post_id"]:
+            destination = await conn.fetchrow(
+                "SELECT name, floor FROM posts WHERE id=$1", row["destination_post_id"]
+            )
+        if destination and destination["name"]:
+            asyncio.create_task(send_wayfinding_email(
+                to_email          = row["visitor_email"],
+                visitor_name      = row["visitor_name"],
+                host_name         = row["host_name"],
+                destination_name  = destination["name"],
+                destination_floor = destination["floor"],
+                qr_ref            = row["qr_ref"],
+            ))
+        else:
+            asyncio.create_task(send_status_update_email(
+                to_email     = row["visitor_email"],
+                visitor_name = row["visitor_name"],
+                host_name    = row["host_name"],
+                visit_date   = str(row["visit_date"]),
+                status       = "Checked In",
+            ))
     return {"id": request_id, "status": "Checked In", "badge_number": body.badge_number}
 
 

@@ -1,6 +1,7 @@
 import os
 import base64
 import logging
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 import httpx
@@ -22,6 +23,19 @@ EMAILJS_PUBLIC_KEY    = os.getenv("EMAILJS_PUBLIC_KEY", "")
 EMAILJS_PRIVATE_KEY   = os.getenv("EMAILJS_PRIVATE_KEY", "")
 
 EMAILJS_URL = "https://api.emailjs.com/api/v1.0/email/send"
+
+# --- Frontend base URL (used to build wayfinding email links) -------------
+# Resolution order: FRONTEND_URL env var, then the first non-localhost
+# origin in CORS_ORIGINS (same trick webauthn.py uses), then localhost.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").rstrip("/")
+if not FRONTEND_URL:
+    for _origin in [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]:
+        _parsed = urlparse(_origin)
+        if _parsed.scheme in ("http", "https") and _parsed.hostname and _parsed.hostname not in ("localhost", "127.0.0.1"):
+            FRONTEND_URL = _origin.rstrip("/")
+            break
+if not FRONTEND_URL:
+    FRONTEND_URL = "http://localhost:5173"
 
 
 async def _emailjs_send(to_email: str, subject: str, html: str, template_id: str = "") -> bool:
@@ -250,3 +264,95 @@ async def send_status_update_email(
     html    = _build_status_html(visitor_name, host_name, visit_date, status, extra_note)
     template_id = EMAILJS_TEMPLATE_ALT or EMAILJS_TEMPLATE_QR
     return await _emailjs_send(to_email, subject, html, template_id)
+
+
+# --- Wayfinding email ----------------------------------------------------
+
+def _build_wayfinding_html(visitor_name, host_name, destination_name, destination_floor, directions_url):
+    return f"""\
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"/></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:system-ui,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:32px 0;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+
+        <tr><td style="background:#0F172A;padding:24px 32px;">
+          <table width="100%" cellpadding="0" cellspacing="0"><tr>
+            <td>
+              <span style="font-size:20px;">&#128282;</span>
+              <span style="color:#fff;font-size:16px;font-weight:700;margin-left:8px;">Vista VMS</span><br/>
+              <span style="color:#94a3b8;font-size:12px;">Visitor Management System</span>
+            </td>
+            <td align="right">
+              <span style="background:#2563eb;color:#fff;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px;">&#128279;&#65039; Wayfinding</span>
+            </td>
+          </tr></table>
+        </td></tr>
+
+        <tr><td style="padding:28px 32px;">
+          <p style="margin:0 0 4px;font-size:14px;color:#64748b;">You are checked in,</p>
+          <p style="margin:0 0 16px;font-size:22px;font-weight:700;color:#0f172a;">{visitor_name}</p>
+          <p style="margin:0 0 20px;font-size:14px;color:#475569;line-height:1.6;">
+            Your destination is <strong>{destination_name}</strong> &mdash; on <strong>Floor {destination_floor}</strong>.
+            Open the directions below when you're ready to head over. A guard will confirm your arrival when you get there.
+          </p>
+
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;margin-bottom:20px;">
+            <tr><td style="padding:16px 20px;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="font-size:12px;color:#94a3b8;width:110px;">Destination</td>
+                  <td style="font-size:14px;font-weight:600;color:#0f172a;">{destination_name}</td>
+                </tr>
+                <tr>
+                  <td style="font-size:12px;color:#94a3b8;width:110px;padding-top:6px;">Floor</td>
+                  <td style="font-size:14px;font-weight:600;color:#0f172a;padding-top:6px;">{destination_floor}</td>
+                </tr>
+                <tr>
+                  <td style="font-size:12px;color:#94a3b8;width:110px;padding-top:6px;">Host</td>
+                  <td style="font-size:14px;font-weight:600;color:#0f172a;padding-top:6px;">{host_name}</td>
+                </tr>
+              </table>
+            </td></tr>
+          </table>
+
+          <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+            <a href="{directions_url}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 28px;border-radius:999px;">&#9654;&#65039; View Directions</a>
+          </td></tr></table>
+
+          <p style="margin:18px 0 0;font-size:12px;color:#94a3b8;line-height:1.6;">
+            Or open this link in your browser:<br/>
+            <span style="font-family:monospace;font-size:11px;color:#2563eb;word-break:break-all;">{directions_url}</span>
+          </p>
+        </td></tr>
+
+        <tr><td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:16px 32px;text-align:center;">
+          <p style="margin:0;font-size:11px;color:#94a3b8;">Vista VMS &middot; Argo HQ &middot; Paran&aacute;que City</p>
+          <p style="margin:4px 0 0;font-size:11px;color:#94a3b8;">This is an automated message. Do not reply to this email.</p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+"""
+
+
+async def send_wayfinding_email(
+    to_email: str,
+    visitor_name: str,
+    host_name: str,
+    destination_name: str,
+    destination_floor: int,
+    qr_ref: str,
+) -> bool:
+    """Email the visitor a directions link right after check-in. Returns True on success."""
+    directions_url = f"{FRONTEND_URL}/wayfind/{qr_ref}"
+    html = _build_wayfinding_html(
+        visitor_name, host_name, destination_name, destination_floor, directions_url
+    )
+    subject = f"📍 Wayfinding — {destination_name} | Vista VMS"
+    return await _emailjs_send(to_email, subject, html, EMAILJS_TEMPLATE_ALT or EMAILJS_TEMPLATE_QR)

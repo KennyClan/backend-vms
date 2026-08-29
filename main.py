@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from database import create_pool, close_pool
-from routers import auth, visitors, visit_requests, audit, analytics, webauthn, staff, restricted, floor_plan, departments
+from routers import auth, visitors, visit_requests, audit, analytics, webauthn, staff, restricted, floor_plan, departments, wayfinding
 import logging
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -296,6 +296,7 @@ app.include_router(staff.posts_router)
 app.include_router(restricted.router)
 app.include_router(floor_plan.router)
 app.include_router(departments.router)
+app.include_router(wayfinding.router)
 
 # Manual seed endpoint — call once after first deploy
 import traceback
