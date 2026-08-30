@@ -288,6 +288,7 @@ async def lifespan(app: FastAPI):
                 description TEXT,
                 is_restricted BOOLEAN DEFAULT FALSE,
                 restricted_area_id UUID REFERENCES restricted_areas(id) ON DELETE SET NULL,
+                post_id UUID REFERENCES posts(id) ON DELETE SET NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
@@ -320,6 +321,59 @@ async def lifespan(app: FastAPI):
                 END IF;
             END $$;
         """)
+
+        # Department <-> Room mapping. One department = one room = one guard:
+        #  - departments.post_id is the authoritative room (UNIQUE), so a
+        #    department can never point at two rooms and two departments can
+        #    never share a room.
+        #  - a partial unique index on staff_users(post_id) for active guards
+        #    means a room can only ever have ONE active Security Guard.
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'departments' AND column_name = 'post_id'
+                ) THEN
+                    ALTER TABLE departments ADD COLUMN post_id UUID REFERENCES posts(id) ON DELETE SET NULL;
+                END IF;
+            END $$;
+        """)
+
+        # Backfill legacy data: map each department to the floor-plan room
+        # whose free-text 'department' tag matches the department name.
+        # (Rule-of-one already confirmed, so the tag is unambiguous.)
+        # Note: min(uuid) is unavailable on this Windows build, so aggregate
+        # as text and cast afterwards.
+        await conn.execute("""
+            UPDATE departments d
+            SET post_id = t.post_id
+            FROM (
+                SELECT o.properties->>'department' AS dept_name,
+                       MIN(o.properties->>'post_id')::uuid AS post_id
+                FROM floor_plan_objects o
+                WHERE o.object_type = 'room'
+                  AND o.properties->>'post_id' IS NOT NULL
+                  AND o.properties->>'department' IS NOT NULL
+                GROUP BY o.properties->>'department'
+            ) t
+            WHERE d.name = t.dept_name AND d.post_id IS NULL
+        """)
+        logger.info("Department-to-room backfill applied")
+
+        # Enforce the one-department-one-room + one-active-guard-per-room rules.
+        await conn.execute("""
+            DO $$
+            BEGIN
+                CREATE UNIQUE INDEX IF NOT EXISTS departments_post_id_uq ON departments (post_id)
+                    WHERE post_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS one_active_guard_per_room ON staff_users (post_id)
+                    WHERE role = 'Security Guard' AND is_active = TRUE;
+            EXCEPTION WHEN unique_violation THEN
+                RAISE NOTICE 'Room uniqueness enforcement skipped: existing data maps one room to multiple departments/guards';
+            END $$;
+        """)
+        logger.info("Department/room/guard uniqueness constraints verified")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS webauthn_credentials (

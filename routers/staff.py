@@ -143,16 +143,39 @@ async def create_staff(
         if not post_exists:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That post does not exist")
 
+    is_guard = body.role.value == UserRole.guard.value
+
+    # Department owns the room: the staff member's room IS their department's
+    # room — there is no independent room picker anymore.
+    dept = None
     if body.department_id is not None:
-        dept_exists = await conn.fetchval("SELECT 1 FROM departments WHERE id=$1", body.department_id)
-        if not dept_exists:
+        dept = await conn.fetchrow(
+            "SELECT id, name, post_id FROM departments WHERE id=$1", body.department_id
+        )
+        if not dept:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That department does not exist")
 
-    if body.role.value == UserRole.guard.value and body.post_id is None:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "A Security Guard must be assigned to a room — select a post before saving",
+    if is_guard:
+        if dept is None or dept["post_id"] is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "A Security Guard must belong to a department whose room is linked — "
+                "one department = one room = one guard (link the room in Departments first).",
+            )
+
+    derived_post_id = dept["post_id"] if dept is not None else body.post_id
+
+    if is_guard:
+        occupant = await conn.fetchrow(
+            "SELECT id, name FROM staff_users WHERE post_id=$1 AND role='Security Guard' AND is_active",
+            derived_post_id,
         )
+        if occupant:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"This room already has an active guard ({occupant['name']}). "
+                "Reassign or deactivate them before assigning another guard here.",
+            )
 
     permissions = _permissions_for(body.role.value, body.permissions)
     row = await conn.fetchrow(
@@ -162,7 +185,7 @@ async def create_staff(
         RETURNING id, name, initials, email, role, is_active, post_id, department_id, permissions
         """,
         body.name, _initials(body.name), body.email.lower(),
-        hash_password(body.password), body.role.value, body.post_id, body.department_id,
+        hash_password(body.password), body.role.value, derived_post_id, body.department_id,
         json.dumps(permissions),
     )
     row = dict(row)
@@ -179,38 +202,75 @@ async def update_staff(
     _m:    dict = Depends(require_modules("staff")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
-    target = await conn.fetchrow("SELECT id, role, permissions, post_id FROM staff_users WHERE id=$1", staff_id)
+    target = await conn.fetchrow(
+        "SELECT id, name, role, permissions, post_id, department_id FROM staff_users WHERE id=$1", staff_id
+    )
     if not target:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Staff member not found")
 
-    if body.post_id is not None and not body.clear_post:
+    if body.post_id is not None:
         post_exists = await conn.fetchval("SELECT 1 FROM posts WHERE id=$1", body.post_id)
         if not post_exists:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That post does not exist")
 
-    if body.department_id is not None and not body.clear_department:
-        dept_exists = await conn.fetchval("SELECT 1 FROM departments WHERE id=$1", body.department_id)
-        if not dept_exists:
+    new_role = body.role.value if body.role else target["role"]
+    is_guard = new_role == UserRole.guard.value
+
+    # Resolve the department (explicit change > current).
+    if body.clear_department:
+        dept = None
+    elif body.department_id is not None:
+        dept = await conn.fetchrow(
+            "SELECT id, name, post_id FROM departments WHERE id=$1", body.department_id
+        )
+        if not dept:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That department does not exist")
+    elif target["department_id"]:
+        dept = await conn.fetchrow(
+            "SELECT id, name, post_id FROM departments WHERE id=$1", target["department_id"]
+        )
+    else:
+        dept = None
 
-    new_post_id = None if body.clear_post else body.post_id
-    new_dept_id = None if body.clear_department else body.department_id
+    if body.clear_department and is_guard:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A Security Guard must belong to a department — its room is the guard's post.",
+        )
 
-    # A Security Guard must always resolve to an assigned room — refusing to
-    # save a guard with no post (creation path enforces the same rule).
-    if (body.role.value if body.role else target["role"]) == UserRole.guard.value:
-        final_post_id = None if body.clear_post else (body.post_id or target["post_id"])
-        if final_post_id is None:
+    # Department owns the room: a staff member's room is their department's
+    # room (one department = one room = one guard). No independent post.
+    if dept is not None:
+        new_post_id = dept["post_id"]
+        new_dept_id = dept["id"]
+    else:
+        new_post_id = None if body.clear_post else (body.post_id or target["post_id"])  # legacy manual post
+        new_dept_id = None
+
+    if is_guard and new_post_id is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A Security Guard must belong to a department whose room is linked — "
+            "one department = one room = one guard (link the room in Departments first).",
+        )
+
+    if is_guard:
+        occupant = await conn.fetchrow(
+            "SELECT id, name FROM staff_users "
+            "WHERE post_id=$1 AND role='Security Guard' AND is_active AND id != $2",
+            new_post_id, staff_id,
+        )
+        if occupant:
             raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                "A Security Guard must be assigned to a room — select a post before saving",
+                status.HTTP_409_CONFLICT,
+                f"This room already has an active guard ({occupant['name']}). "
+                "Reassign or deactivate them before assigning another guard here.",
             )
 
     # Module permissions:
     #  - changing role resets access to the new role's defaults
     #  - explicit `permissions` (with unchanged role) replaces the set
     #  - otherwise keep whatever the account already has
-    new_role = body.role.value if body.role else target["role"]
     if new_role != target["role"]:
         permissions = _permissions_for(new_role, None)
     elif body.permissions is not None:
@@ -223,18 +283,16 @@ async def update_staff(
         UPDATE staff_users SET
             role          = COALESCE($2::user_role, role),
             is_active     = COALESCE($3, is_active),
-            post_id       = CASE WHEN $4 THEN NULL WHEN $5::uuid IS NOT NULL THEN $5 ELSE post_id END,
-            department_id = CASE WHEN $6 THEN NULL WHEN $7::uuid IS NOT NULL THEN $7 ELSE department_id END,
-            permissions   = COALESCE($8::jsonb, permissions)
+            post_id       = $4::uuid,
+            department_id = $5::uuid,
+            permissions   = COALESCE($6::jsonb, permissions)
         WHERE id = $1
         RETURNING id, name, initials, email, role, is_active, post_id, department_id, permissions
         """,
         staff_id,
         new_role,
         body.is_active,
-        body.clear_post,
         new_post_id,
-        body.clear_department,
         new_dept_id,
         json.dumps(permissions) if permissions is not None else None,
     )
