@@ -9,11 +9,80 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from limiter import limiter
 from dotenv import load_dotenv
+from utils.auth import get_current_user, require_roles, hash_password
+from models import UserRole, DEFAULT_MODULES_BY_ROLE
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ─── Demo account seeding ─────────────────────────────────────────
+# Seed passwords come from SEED_*_PASSWORD env vars ONLY — never hardcoded,
+# because this repo is public. Auto-seeding on startup runs by default only
+# against local/dev databases; a cloud/prod DB needs an explicit
+# SEED_DEMO=true. An account whose password env var is unset is skipped.
+DEMO_ACCOUNTS = [
+    # (display_name, email, password_env, role) — the Employee account is
+    # shown as a real person ("Lim Kenny") so visitors who type a host name
+    # see a person, not the role word "Employee".
+    ("Super Admin",    "superadmin@vistahq.com", "SEED_SUPERADMIN_PASSWORD", "Super Admin"),
+    ("Administrator",  "admin2@vistahq.com",     "SEED_ADMIN_PASSWORD",     "Administrator"),
+    ("Receptionist",   "reception@vistahq.com",  "SEED_RECEP_PASSWORD",     "Receptionist"),
+    ("Security Guard", "security@vistahq.com",   "SEED_GUARD_PASSWORD",     "Security Guard"),
+    ("Lim Kenny",      "employee@vistahq.com",   "SEED_EMPLOYEE_PASSWORD",  "Employee"),
+]
+
+
+def seed_demo_enabled() -> bool:
+    flag = os.getenv("SEED_DEMO")
+    if flag is not None:
+        return flag.strip().lower() in ("1", "true", "yes", "on")
+    # Default: seed demo accounts on local/dev DBs only, never on a cloud or
+    # prod database unless the deploy explicitly sets SEED_DEMO=true.
+    url = os.getenv("DATABASE_URL", "")
+    return "localhost" in url or "127.0.0.1" in url
+
+
+async def seed_demo_accounts(conn) -> list[str]:
+    """Insert missing demo accounts whose password env var is set. Returns
+    the list of seeded emails. Never falls back to a hardcoded password."""
+    errors = []
+    for val in ('Super Admin', 'Employee'):
+        try:
+            await conn.execute(
+                "DO $$ BEGIN ALTER TYPE user_role ADD VALUE IF NOT EXISTS '"
+                + val + "'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+            )
+        except Exception as e:
+            errors.append(f"enum {val}: {e}")
+
+    import json as _json
+    seeded = []
+    for name, email, env_key, role in DEMO_ACCOUNTS:
+        exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
+        if exists:
+            continue
+        password = os.getenv(env_key, "")
+        if not password:
+            logger.warning(f"Skipping seed {email}: {env_key} is not set")
+            continue
+        initials = "".join(w[0] for w in name.split()[:2]).upper()
+        try:
+            await conn.execute(
+                """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
+                   VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
+                name, initials, email, hash_password(password), role, True,
+                _json.dumps(DEFAULT_MODULES_BY_ROLE.get(role, [])),
+            )
+            seeded.append(email)
+            logger.info(f"Seeded: {name} <{email}>")
+        except Exception as e:
+            errors.append(f"{email}: {e}")
+    if errors:
+        logger.error(f"Seed errors: {errors}")
+    return seeded
 
 
 @asynccontextmanager
@@ -264,43 +333,21 @@ async def lifespan(app: FastAPI):
             END $$;
         """)
 
-        # Seed default accounts (skip any that already exist)
-        from utils.auth import hash_password
-        # (display_name, email, password, role) — the Employee account is
-        # displayed as a real person ("Lim Kenny") so visitors who type a
-        # host name see a person, not the role word "Employee".
-        accounts = [
-            ("Super Admin",    "superadmin@vistahq.com","Admin@12345",  "Super Admin"),
-            ("Administrator",  "admin2@vistahq.com",    "Admin@12345",  "Administrator"),
-            ("Receptionist",   "reception@vistahq.com", "Recep@12345",  "Receptionist"),
-            ("Security Guard", "security@vistahq.com",  "Guard@12345",  "Security Guard"),
-            ("Lim Kenny",      "employee@vistahq.com",  "Employee@12345","Employee"),
-        ]
-        # Rename any legacy "Employee" display name to "Lim Kenny" so the
-        # rename also lands on databases seeded before this change.
+        # Rename any legacy "Employee" display name to "Lim Kenny" — data
+        # migration; runs regardless of demo seeding.
         await conn.execute(
             "UPDATE staff_users SET name='Lim Kenny', initials='LK' "
             "WHERE email='employee@vistahq.com' AND name='Employee'"
         )
-        seeded = 0
-        for name, email, password, role in accounts:
-            exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
-            if not exists:
-                initials = "".join(w[0] for w in name.split()[:2]).upper()
-                default_perms = DEFAULT_MODULES_BY_ROLE.get(role, [])
-                try:
-                    await conn.execute(
-                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
-                           VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
-                        name, initials, email, hash_password(password), role, True,
-                        _json.dumps(default_perms),
-                    )
-                    seeded += 1
-                    logger.info(f"Seeded: {name} <{email}>")
-                except Exception as e:
-                    logger.error(f"Failed to seed {email}: {e}")
-        if seeded:
-            logger.info(f"Seeded {seeded} new account(s)")
+
+        # Seed demo accounts only when enabled (local/dev DB by default,
+        # or SEED_DEMO=true). Passwords come from SEED_*_PASSWORD env vars.
+        if seed_demo_enabled():
+            seeded = await seed_demo_accounts(conn)
+            if seeded:
+                logger.info(f"Seeded {len(seeded)} new account(s)")
+        else:
+            logger.info("Demo account seeding skipped (SEED_DEMO not enabled)")
 
     yield
     await close_pool()
@@ -340,63 +387,27 @@ app.include_router(floor_plan.router)
 app.include_router(departments.router)
 app.include_router(wayfinding.router)
 
-# Manual seed endpoint — call once after first deploy
+# Manual seed endpoint — call once after first deploy. Requires admin auth.
+# It seeds accounts whose password env var is set; SEED_DEMO is not required.
 import traceback
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from database import get_pool
-from utils.auth import hash_password
 
 _seed_router = APIRouter()
 
 @_seed_router.get("/admin/accounts")
-async def list_accounts():
+async def list_accounts(current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin))):
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, name, email, role, is_active FROM staff_users ORDER BY created_at")
         return [{"id": str(r["id"]), "name": r["name"], "email": r["email"], "role": r["role"], "is_active": r["is_active"]} for r in rows]
 
 @_seed_router.post("/admin/seed")
-async def seed_accounts():
+async def seed_accounts(current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin))):
     pool = get_pool()
     async with pool.acquire() as conn:
-        errors = []
-        # Ensure enum values exist
-        for val in ('Super Admin', 'Employee'):
-            try:
-                await conn.execute(
-                    "DO $$ BEGIN ALTER TYPE user_role ADD VALUE IF NOT EXISTS '"
-                    + val
-                    + "'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
-                )
-            except Exception as e:
-                errors.append(f"enum {val}: {e}")
-
-        import json as _json
-        from models import DEFAULT_MODULES_BY_ROLE
-        accounts = [
-            ("Super Admin",    "superadmin@vistahq.com","Admin@12345",  "Super Admin"),
-            ("Administrator",  "admin2@vistahq.com",    "Admin@12345",  "Administrator"),
-            ("Receptionist",   "reception@vistahq.com", "Recep@12345",  "Receptionist"),
-            ("Security Guard", "security@vistahq.com",  "Guard@12345",  "Security Guard"),
-            ("Lim Kenny",      "employee@vistahq.com",  "Employee@12345","Employee"),
-        ]
-        created = []
-        for name, email, password, role in accounts:
-            exists = await conn.fetchval("SELECT 1 FROM staff_users WHERE email=$1", email)
-            if not exists:
-                initials = "".join(w[0] for w in name.split()[:2]).upper()
-                try:
-                    await conn.execute(
-                        """INSERT INTO staff_users (name, initials, email, password_hash, role, is_active, permissions)
-                           VALUES ($1,$2,$3,$4,$5::user_role,$6,$7::jsonb)""",
-                        name, initials, email, hash_password(password), role, True,
-                        _json.dumps(DEFAULT_MODULES_BY_ROLE.get(role, [])),
-                    )
-                    created.append(email)
-                except Exception as e:
-                    errors.append(f"{email}: {e}")
-
-        return {"created": created, "errors": errors}
+        created = await seed_demo_accounts(conn)
+        return {"created": created, "skipped_missing_password": True}
 
 app.include_router(_seed_router)
 
