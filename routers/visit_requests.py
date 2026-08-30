@@ -286,9 +286,12 @@ async def assign_employee(
 async def check_in(
     request_id: uuid.UUID,
     body:       CheckInIn,
-    current:    dict               = Depends(require_roles(UserRole.admin, UserRole.guard)),
+    current:    dict               = Depends(require_roles(UserRole.super_admin, UserRole.admin, UserRole.recep)),
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
+    """FRONT DESK (building entrance, not room-specific): scan the visitor's
+    QR pass, verify ID, issue the physical badge (badge_number). Room Guards
+    never issue badges — their scan is room-specific via /posts/{id}/arrivals."""
     row = await conn.fetchrow(
         "SELECT id, visitor_id, visitor_name, visitor_email, host_name, host_staff_id, visit_date, qr_ref, approval_status, destination_type, destination_post_id FROM visit_requests WHERE id=$1", request_id
     )
@@ -388,9 +391,12 @@ async def check_in(
 @router.patch("/{request_id}/check-out")
 async def check_out(
     request_id: uuid.UUID,
-    current:    dict               = Depends(require_roles(UserRole.admin, UserRole.guard)),
+    current:    dict               = Depends(require_roles(UserRole.super_admin, UserRole.admin, UserRole.recep)),
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
+    """FRONT DESK building exit: marks the visit Checked Out and returns the
+    badge. Room-specific departures are logged by the Room Guard via
+    /posts/{id}/departures — the two flows never meet."""
     row = await conn.fetchrow(
         "SELECT visitor_name, visitor_email, host_name, visit_date, status FROM visit_requests WHERE id=$1", request_id
     )

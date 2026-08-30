@@ -461,6 +461,12 @@ async def lookup_badge(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No active visit found for this badge")
 
     is_correct_destination = visit["destination_post_id"] == post_id
+    destination_name = None
+    if visit["destination_post_id"]:
+        dest = await conn.fetchrow(
+            "SELECT name, room_number FROM posts WHERE id=$1", visit["destination_post_id"]
+        )
+        destination_name = _room_label_from_row(dest) if dest else None
     return {
         "visit_id": visit["id"],
         "visitor_name": visit["visitor_name"],
@@ -476,21 +482,37 @@ async def lookup_badge(
         "status": visit["status"],
         "badge_number": visit["badge_number"],
         "is_correct_destination": is_correct_destination,
+        "destination_name": destination_name,
     }
+
+
+def _room_label_from_row(row) -> str:
+    if not row or not row.get("name"):
+        return "this room"
+    return f"{row['name']} ({row.get('room_number')})" if row.get("room_number") else row["name"]
 
 
 @posts_router.post("/{post_id}/arrivals")
 async def scan_arrival(
     post_id: uuid.UUID,
     body: ArrivalScanIn,
-    current: dict = Depends(get_current_user),  # the guard doing the scan
+    current: dict = Depends(get_current_user),  # the Room Guard doing the scan
     conn: asyncpg.Connection = Depends(get_conn),
 ):
-    """A guard scans a visitor's badge at this room. Looks up the active
-    visit that badge is issued to, enforces the room's checklist per its
-    restriction level, logs an arrival, and flags a mismatch (without
-    blocking it) if this isn't actually their assigned destination — guards
-    can still admit someone off-route, but the system notes it."""
+    """ROOM GUARD scan (department room, not front desk): the guard runs
+    their assigned ROOM's badge over the scanner and the system logs that
+    the visitor has physically arrived at that room.
+
+    The badge was already issued by the Front Desk at the building entrance
+    (badges.badge_number -> the active visit). This endpoint enforces the
+    one-guard-one-room rule:
+      1. badge_number resolves to the live visit
+      2. the visit's assigned destination MUST be this guard's room —
+         a badge headed to another department's room (e.g. HR when this is
+         IT) is REJECTED, not silently admitted
+      3. arrival is logged against THIS post + THIS guard (scanned_by),
+         which also flips the visitor's wayfinding link to "arrived"
+    """
     await _check_guard_room_access(post_id, current)
     visit_id = await _lookup_active_badge(conn, body.badge_number)
 
@@ -505,6 +527,30 @@ async def scan_arrival(
     )
     if not visit:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No active visit found for this badge")
+
+    # Room Guards only admit visitors whose assigned destination IS their
+    # room. Two rooms can never share a guard's scan (one dept = one room =
+    # one guard — enforced two layers down by DB unique indexes too).
+    if visit["destination_post_id"] != post_id:
+        dest_name = None
+        if visit["destination_post_id"]:
+            dest = await conn.fetchrow(
+                "SELECT name, room_number FROM posts WHERE id=$1", visit["destination_post_id"]
+            )
+            dest_name = dest["name"] if dest else None
+        room = await conn.fetchrow("SELECT name, room_number FROM posts WHERE id=$1", post_id)
+        here = _room_label_from_row(room)
+        if dest_name:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Badge {body.badge_number} belongs to {visit['visitor_name']}, who is assigned to "
+                f"\"{dest_name}\" — this is {here}. Route them to their assigned destination room.",
+            )
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Badge {body.badge_number} ({visit['visitor_name']}) has no room destination assigned "
+            f"— that visitor belongs at the Front Desk, not a department room.",
+        )
 
     # Room restriction level gates what the guard must complete first.
     #   none             -> scan only, no checklist
@@ -543,7 +589,7 @@ async def scan_arrival(
         """,
         visit["id"], post_id, current["id"], body.id_verified, body.photo_captured, body.photo,
     )
-    await write_audit(conn, "Checked In", actor=current, visit_request_id=visit["id"], visitor_name=visit["visitor_name"])
+    await write_audit(conn, "Room Arrival", actor=current, visit_request_id=visit["id"], visitor_name=visit["visitor_name"])
 
     is_correct_destination = visit["destination_post_id"] == post_id
     return {
@@ -562,7 +608,7 @@ async def scan_arrival(
         "status": visit["status"],
         "badge_number": visit["badge_number"],
         "is_correct_destination": is_correct_destination,
-        "detail": "Arrival logged" if is_correct_destination else "Arrival logged — note: this is not this visitor's assigned destination",
+        "detail": f"Visitor arrived at {_room_label_from_row(post)}",
     }
 
 
@@ -597,7 +643,7 @@ async def scan_departure(
     visit = await conn.fetchrow(
         "SELECT visitor_name FROM visit_requests WHERE id=$1", visit_id
     )
-    await write_audit(conn, "Checked Out", actor=current, visit_request_id=visit_id,
+    await write_audit(conn, "Room Departure", actor=current, visit_request_id=visit_id,
                       visitor_name=visit["visitor_name"] if visit else None,
                       detail="Room departure scan")
     return {"room_visit_id": rv["id"], "detail": "Departure logged"}

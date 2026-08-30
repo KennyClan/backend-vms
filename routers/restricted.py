@@ -175,7 +175,7 @@ async def grant_access(
 @router.post("/badge/issue")
 async def issue_badge(
     body:    IssueBadgeIn,
-    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.guard)),
+    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep)),
     _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
@@ -254,7 +254,7 @@ async def issue_badge(
 @router.post("/badge/confirm-entry")
 async def confirm_entry(
     body:    BadgeScanIn,
-    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.guard)),
+    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep)),
     _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
@@ -293,7 +293,7 @@ async def confirm_entry(
 @router.post("/badge/confirm-exit")
 async def confirm_exit(
     body:    ExitScanIn,
-    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.guard)),
+    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep)),
     _m:      dict               = Depends(require_modules("restricted")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):

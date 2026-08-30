@@ -483,6 +483,7 @@ async def lifespan(app: FastAPI):
             "Staff Login", "Staff Logout",
             "Request Created", "Request Approved", "Request Rejected", "Request Assigned",
             "Checked In", "Checked Out",
+            "Room Arrival", "Room Departure",
             "Visitor Blocked", "Visitor Unblocked",
             "Self-Visit Created", "Destination Arrival", "Host Notified",
             "Biometric Registered",

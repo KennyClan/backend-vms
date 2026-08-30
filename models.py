@@ -66,10 +66,10 @@ DEFAULT_MODULES_BY_ROLE = {
         "analytics", "audit", "restricted", "staff", "departments", "floorplan", "badges",
     ],
     UserRole.recep.value: [
-        "dashboard", "visitors", "requests", "analytics", "audit", "floorplan", "badges",
+        "dashboard", "visitors", "requests", "security", "analytics", "audit", "floorplan", "badges",
     ],
     UserRole.guard.value: [
-        "dashboard", "myroom", "visitors", "security", "restricted",
+        "dashboard", "myroom",
     ],
     UserRole.employee.value: [
         "dashboard", "requests", "visitor-history",
