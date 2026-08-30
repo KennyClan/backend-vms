@@ -46,6 +46,33 @@ class BulkSaveIn(BaseModel):
     objects: list[ObjectCreateIn]
 
 
+# Map the floor-plan editor's access_level vocabulary onto the room-level
+# restriction enum (none | restricted | highly_restricted) enforced by the
+# Room Guard and capacity flows.
+_ACCESS_TO_RESTRICTION = {
+    "Restricted": "restricted",
+    "Highly Restricted": "highly_restricted",
+    "Public": "none",
+    "Employee Only": "none",
+}
+
+
+async def _sync_post_level(conn: asyncpg.Connection, properties):
+    """When a room object is linked to a VMS post, mirror its access_level
+    onto posts.restriction_level so Room Guard enforcement and capacity
+    checks see the same level the editor shows."""
+    if not isinstance(properties, dict):
+        return
+    post_id = properties.get("post_id")
+    if not post_id:
+        return
+    level = _ACCESS_TO_RESTRICTION.get(properties.get("access_level"), "none")
+    await conn.execute(
+        "UPDATE posts SET restriction_level=$1 WHERE id=$2",
+        level, post_id,
+    )
+
+
 def _row_to_dict(row):
     d = dict(row)
     if "properties" in d and isinstance(d["properties"], str):
@@ -166,6 +193,8 @@ async def create_object(
         floor_id, body.object_type, body.x, body.y, body.width, body.height,
         body.rotation, body.name, json.dumps(body.properties), body.z_index,
     )
+    if body.object_type == "room":
+        await _sync_post_level(conn, body.properties)
     return _row_to_dict(row)
 
 
@@ -197,6 +226,8 @@ async def update_object(
         body.x, body.y, body.width, body.height,
         body.rotation, body.name, props_json, body.z_index, body.floor_id,
     )
+    if body.properties is not None:
+        await _sync_post_level(conn, body.properties)
     return _row_to_dict(row)
 
 
@@ -258,4 +289,6 @@ async def bulk_save_objects(
                 floor_id, obj.object_type, obj.x, obj.y, obj.width, obj.height,
                 obj.rotation, obj.name, json.dumps(obj.properties), obj.z_index,
             )
+            if obj.object_type == "room":
+                await _sync_post_level(conn, obj.properties)
     return {"ok": True, "count": len(body.objects)}

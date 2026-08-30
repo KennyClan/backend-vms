@@ -146,6 +146,7 @@ async def lifespan(app: FastAPI):
                 status TEXT NOT NULL DEFAULT 'Pending',
                 restricted_badge TEXT,
                 approved_by UUID,
+                approved_at TIMESTAMPTZ,
                 badge_issued_by UUID,
                 entry_confirmed_by UUID,
                 granted_at TIMESTAMPTZ DEFAULT NOW(),
@@ -169,6 +170,77 @@ async def lifespan(app: FastAPI):
             );
         """)
         logger.info("Restricted area & post tables verified")
+
+        # Badges are a separate entity from the visit QR pass: a physical
+        # badge is issued only after Front Desk Security approves check-in.
+        # room_visits tracks who is physically inside which room/post.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS badges (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                badge_number TEXT NOT NULL UNIQUE,
+                visitor_id UUID,
+                visit_request_id UUID,
+                issued_at TIMESTAMPTZ DEFAULT NOW(),
+                returned_at TIMESTAMPTZ,
+                status TEXT NOT NULL DEFAULT 'active'
+            );
+            CREATE TABLE IF NOT EXISTS room_visits (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                visit_request_id UUID,
+                post_id UUID,
+                scanned_by UUID,
+                arrived_at TIMESTAMPTZ DEFAULT NOW(),
+                departed_at TIMESTAMPTZ,
+                id_verified BOOLEAN DEFAULT FALSE,
+                photo_captured BOOLEAN DEFAULT FALSE,
+                photo TEXT
+            );
+        """)
+        # Deployed DBs may pre-date the spec columns; add missing ones
+        # idempotently (legacy schema used badge_number + is_available only),
+        # plus room capacity / restriction_level on posts.
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='visitor_id') THEN
+                    ALTER TABLE badges ADD COLUMN visitor_id UUID;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='visit_request_id') THEN
+                    ALTER TABLE badges ADD COLUMN visit_request_id UUID;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='issued_at') THEN
+                    ALTER TABLE badges ADD COLUMN issued_at TIMESTAMPTZ DEFAULT NOW();
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='returned_at') THEN
+                    ALTER TABLE badges ADD COLUMN returned_at TIMESTAMPTZ;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='status') THEN
+                    ALTER TABLE badges ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='room_visits' AND column_name='id_verified') THEN
+                    ALTER TABLE room_visits ADD COLUMN id_verified BOOLEAN DEFAULT FALSE;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='room_visits' AND column_name='photo_captured') THEN
+                    ALTER TABLE room_visits ADD COLUMN photo_captured BOOLEAN DEFAULT FALSE;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='room_visits' AND column_name='photo') THEN
+                    ALTER TABLE room_visits ADD COLUMN photo TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='capacity') THEN
+                    ALTER TABLE posts ADD COLUMN capacity INTEGER NOT NULL DEFAULT 10;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='restriction_level') THEN
+                    ALTER TABLE posts ADD COLUMN restriction_level TEXT NOT NULL DEFAULT 'none';
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='restricted_access' AND column_name='entry_confirmed_at') THEN
+                    ALTER TABLE restricted_access ADD COLUMN entry_confirmed_at TIMESTAMPTZ;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='restricted_access' AND column_name='approved_at') THEN
+                    ALTER TABLE restricted_access ADD COLUMN approved_at TIMESTAMPTZ;
+                END IF;
+            END $$;
+        """)
+        logger.info("Badges, room visits & room capacity tables verified")
 
         # Departments table
         await conn.execute("""

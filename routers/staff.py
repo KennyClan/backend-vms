@@ -225,6 +225,7 @@ async def list_posts(
     rows = await conn.fetch(
         """
         SELECT p.id, p.name, p.description, p.floor, p.pos_x, p.pos_y, p.width, p.height,
+               p.capacity, p.restriction_level,
                COUNT(su.id) AS assigned_count
         FROM posts p
         LEFT JOIN staff_users su ON su.post_id = p.id AND su.is_active
@@ -244,7 +245,7 @@ async def post_detail(
     """Everything an admin sees when clicking a room on the map: who's
     assigned there, and which visitors have arrived and not yet left."""
     post = await conn.fetchrow(
-        "SELECT id, name, description, floor, pos_x, pos_y, width, height FROM posts WHERE id=$1",
+        "SELECT id, name, description, floor, pos_x, pos_y, width, height, capacity, restriction_level FROM posts WHERE id=$1",
         post_id,
     )
     if not post:
@@ -281,6 +282,28 @@ async def post_detail(
 
 class ArrivalScanIn(BaseModel):
     badge_number: str
+    id_verified: bool = False
+    photo_captured: bool = False
+    photo: str | None = None
+
+
+class DepartureScanIn(BaseModel):
+    badge_number: str
+
+
+async def _lookup_active_badge(conn: asyncpg.Connection, badge_number: str):
+    """Resolve a live physical badge to its visit request (new badges schema:
+    badge_number -> visit_request_id, status active/returned)."""
+    badge = await conn.fetchrow(
+        "SELECT visit_request_id FROM badges WHERE badge_number=$1 AND status='active'",
+        badge_number,
+    )
+    if not badge:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail="Badge not recognized or not currently issued",
+        )
+    return badge["visit_request_id"]
 
 
 @posts_router.post("/{post_id}/lookup-badge")
@@ -292,12 +315,7 @@ async def lookup_badge(
 ):
     """Look up a badge without logging an arrival. Used by room guards to
     preview visitor details before confirming arrival."""
-    badge = await conn.fetchrow(
-        "SELECT last_issued_to FROM badges WHERE badge_number=$1 AND is_available=false",
-        body.badge_number,
-    )
-    if not badge or not badge["last_issued_to"]:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Badge not recognized or not currently issued")
+    visit_id = await _lookup_active_badge(conn, body.badge_number)
 
     visit = await conn.fetchrow(
         """
@@ -306,7 +324,7 @@ async def lookup_badge(
                destination_post_id
         FROM visit_requests WHERE id=$1
         """,
-        badge["last_issued_to"],
+        visit_id,
     )
     if not visit:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No active visit found for this badge")
@@ -338,15 +356,11 @@ async def scan_arrival(
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     """A guard scans a visitor's badge at this room. Looks up the active
-    visit that badge is issued to, logs an arrival, and flags a mismatch
-    (without blocking it) if this isn't actually their assigned destination —
-    guards can still admit someone off-route, but the system notes it."""
-    badge = await conn.fetchrow(
-        "SELECT last_issued_to FROM badges WHERE badge_number=$1 AND is_available=false",
-        body.badge_number,
-    )
-    if not badge or not badge["last_issued_to"]:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Badge not recognized or not currently issued")
+    visit that badge is issued to, enforces the room's checklist per its
+    restriction level, logs an arrival, and flags a mismatch (without
+    blocking it) if this isn't actually their assigned destination — guards
+    can still admit someone off-route, but the system notes it."""
+    visit_id = await _lookup_active_badge(conn, body.badge_number)
 
     visit = await conn.fetchrow(
         """
@@ -355,18 +369,47 @@ async def scan_arrival(
                destination_post_id
         FROM visit_requests WHERE id=$1
         """,
-        badge["last_issued_to"],
+        visit_id,
     )
     if not visit:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No active visit found for this badge")
 
+    # Room restriction level gates what the guard must complete first.
+    #   none             -> scan only, no checklist
+    #   restricted       -> ID must be verified
+    #   highly_restricted-> ID verified AND a real photo must be attached
+    post = await conn.fetchrow(
+        "SELECT restriction_level, name FROM posts WHERE id=$1", post_id
+    )
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Room/post not found")
+    level = post["restriction_level"]
+    if level in ("restricted", "highly_restricted") and not body.id_verified:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Valid ID must be verified by the guard before entry to {post['name']}",
+        )
+    if level == "highly_restricted" and not (body.photo_captured and body.photo):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A photo of the visitor is required before entry to this highly restricted room",
+        )
+
+    already = await conn.fetchval(
+        """SELECT 1 FROM room_visits
+           WHERE visit_request_id=$1 AND post_id=$2 AND departed_at IS NULL""",
+        visit["id"], post_id,
+    )
+    if already:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Visitor is already inside this room")
+
     row = await conn.fetchrow(
         """
-        INSERT INTO room_visits (visit_request_id, post_id, scanned_by)
-        VALUES ($1, $2, $3)
+        INSERT INTO room_visits (visit_request_id, post_id, scanned_by, id_verified, photo_captured, photo)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id, arrived_at
         """,
-        visit["id"], post_id, current["id"],
+        visit["id"], post_id, current["id"], body.id_verified, body.photo_captured, body.photo,
     )
     await write_audit(conn, "Checked In", actor=current, visit_request_id=visit["id"], visitor_name=visit["visitor_name"])
 
@@ -389,6 +432,42 @@ async def scan_arrival(
         "is_correct_destination": is_correct_destination,
         "detail": "Arrival logged" if is_correct_destination else "Arrival logged — note: this is not this visitor's assigned destination",
     }
+
+
+@posts_router.post("/{post_id}/departures")
+async def scan_departure(
+    post_id: uuid.UUID,
+    body: DepartureScanIn,
+    current: dict = Depends(get_current_user),  # the guard doing the scan
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Room guard checks a visitor out of a room by scanning their badge.
+    Marks the active room_visits row departed, which decrements the room's
+    live occupancy (counted from nondeparted rows) — satisfying the real-time
+    capacity model without a mutable counter that could race."""
+    visit_id = await _lookup_active_badge(conn, body.badge_number)
+
+    rv = await conn.fetchrow(
+        """SELECT id FROM room_visits
+           WHERE post_id=$1 AND visit_request_id=$2 AND departed_at IS NULL
+           ORDER BY arrived_at DESC LIMIT 1""",
+        post_id, visit_id,
+    )
+    if not rv:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail="No active arrival found for this badge at this room",
+        )
+    await conn.execute(
+        "UPDATE room_visits SET departed_at=NOW() WHERE id=$1", rv["id"]
+    )
+    visit = await conn.fetchrow(
+        "SELECT visitor_name FROM visit_requests WHERE id=$1", visit_id
+    )
+    await write_audit(conn, "Checked Out", actor=current, visit_request_id=visit_id,
+                      visitor_name=visit["visitor_name"] if visit else None,
+                      detail="Room departure scan")
+    return {"room_visit_id": rv["id"], "detail": "Departure logged"}
 
 
 @posts_router.get("/{post_id}/recent-arrivals")
@@ -443,6 +522,8 @@ class PostUpdateIn(BaseModel):
     name: str | None = None
     description: str | None = None
     floor: int | None = None
+    capacity: int | None = None
+    restriction_level: str | None = None
 
 
 @posts_router.patch("/{post_id}")
@@ -456,22 +537,27 @@ async def update_post(
     existing = await conn.fetchrow("SELECT id FROM posts WHERE id=$1", post_id)
     if not existing:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Post not found")
+    if body.restriction_level and body.restriction_level not in ("none", "restricted", "highly_restricted"):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="restriction_level must be one of: none, restricted, highly_restricted")
 
     row = await conn.fetchrow(
         """
         UPDATE posts SET
-            pos_x       = COALESCE($2, pos_x),
-            pos_y       = COALESCE($3, pos_y),
-            width       = COALESCE($4, width),
-            height      = COALESCE($5, height),
-            name        = COALESCE($6, name),
-            description = COALESCE($7, description),
-            floor       = COALESCE($8, floor)
+            pos_x            = COALESCE($2, pos_x),
+            pos_y            = COALESCE($3, pos_y),
+            width            = COALESCE($4, width),
+            height           = COALESCE($5, height),
+            name             = COALESCE($6, name),
+            description      = COALESCE($7, description),
+            floor            = COALESCE($8, floor),
+            capacity         = COALESCE($9, capacity),
+            restriction_level= COALESCE($10, restriction_level)
         WHERE id = $1
-        RETURNING id, name, description, floor, pos_x, pos_y, width, height
+        RETURNING id, name, description, floor, pos_x, pos_y, width, height, capacity, restriction_level
         """,
         post_id,
         body.pos_x, body.pos_y, body.width, body.height,
-        body.name, body.description, body.floor,
+        body.name, body.description, body.floor, body.capacity, body.restriction_level,
     )
     return dict(row)

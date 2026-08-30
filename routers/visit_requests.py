@@ -91,9 +91,33 @@ async def create_request(
             "Please wait for it to be approved or rejected before submitting a new one.",
         )
 
+    # Spec routing: match the stated host name against employee records
+    # (exact, case-insensitive). Match found -> route directly to that
+    # employee's pending-approval queue by setting host_staff_id. No match ->
+    # left unassigned so the receptionist can route it, or reject with reason.
+    host_staff_id = body.host_staff_id
+    host_name = (body.host_name or "").strip()
+    candidate = None
+    if host_staff_id is not None:
+        candidate = await conn.fetchrow(
+            "SELECT id, name FROM staff_users WHERE id=$1 AND role='Employee' AND is_active=true",
+            host_staff_id,
+        )
+    if not candidate:
+        candidate = await conn.fetchrow(
+            """SELECT id, name FROM staff_users
+               WHERE role='Employee' AND is_active=true
+                 AND lower(trim(name)) = lower($1)
+               LIMIT 1""",
+            host_name,
+        )
+    host_staff_id = candidate["id"] if candidate else None
+    if candidate:
+        host_name = candidate["name"]
+
     # Auto-derive destination_type from host's department if host_staff_id provided
     destination_type = body.destination_type or "Normal"
-    if body.host_staff_id:
+    if host_staff_id:
         dept_info = await conn.fetchrow(
             """
             SELECT d.is_restricted
@@ -101,7 +125,7 @@ async def create_request(
             JOIN departments d ON d.id = su.department_id
             WHERE su.id = $1
             """,
-            body.host_staff_id,
+            host_staff_id,
         )
         if dept_info and dept_info["is_restricted"]:
             destination_type = "Restricted"
@@ -114,11 +138,12 @@ async def create_request(
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
         """,
         visitor_id, body.visitor_name, body.visitor_email,
-        body.host_name, body.host_staff_id,
+        host_name, host_staff_id,
         body.visit_date, body.expected_time, body.purpose, destination_type,
     )
+    matched = "matched to employee" if host_staff_id else "no matching employee"
     await write_audit(conn, "Request Created", visit_request_id=row["id"],
-                      visitor_name=row["visitor_name"], detail=f"Visit date: {row['visit_date']}, Destination: {destination_type}")
+                      visitor_name=row["visitor_name"], detail=f"Visit date: {row['visit_date']}, Destination: {destination_type}, Host: {matched}")
     return dict(row)
 
 
@@ -135,18 +160,17 @@ async def approve_or_reject(
 
     # Permission check: who may act on this request.
     #   * Employee  -> only their own requests (approve or reject).
-    #   * Admin/S.A -> any request, any action.
     #   * Receptionist -> may ONLY reject (they route mis-assigned requests
     #     to the right employee via /assign; they never approve).
+    #   * Admin / Super Admin -> NO approval or rejection; that stays with
+    #     the host Employee and the Receptionist per the access spec.
     role = current["role"]
     if role == UserRole.employee.value:
         if row["host_staff_id"] != uuid.UUID(str(current["id"])):
             raise HTTPException(403, "You can only approve requests where you are the host")
-    elif role in (UserRole.admin.value, UserRole.super_admin.value):
-        pass
     elif role == UserRole.recep.value:
         if body.action != ApprovalStatus.rejected:
-            raise HTTPException(403, "Only the host employee or an administrator can approve a request")
+            raise HTTPException(403, "Only the host employee can approve a request — receptionists route or reject")
     else:
         raise HTTPException(403, "Insufficient permissions")
 
@@ -155,6 +179,23 @@ async def approve_or_reject(
         raise HTTPException(400, "Rejection reason is required")
 
     if body.action == ApprovalStatus.approved:
+        # Room capacity check before finalizing approval into a room
+        if body.destination_post_id:
+            post = await conn.fetchrow(
+                "SELECT capacity FROM posts WHERE id=$1", body.destination_post_id
+            )
+            if not post:
+                raise HTTPException(404, "Destination room not found")
+            occ = await conn.fetchval(
+                """SELECT COUNT(*) FROM room_visits
+                   WHERE post_id=$1 AND departed_at IS NULL""",
+                body.destination_post_id,
+            )
+            if occ >= post["capacity"]:
+                raise HTTPException(
+                    409,
+                    f"Destination room is at capacity ({occ}/{post['capacity']}) — choose another room",
+                )
         await conn.execute(
             "UPDATE visit_requests SET approval_status='Approved', status='Pending Arrival', approved_by=$1, approved_at=NOW(), destination_post_id=$3 WHERE id=$2",
             uuid.UUID(str(current["id"])), request_id, body.destination_post_id,
@@ -249,12 +290,34 @@ async def check_in(
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
     row = await conn.fetchrow(
-        "SELECT id, visitor_name, visitor_email, host_name, host_staff_id, visit_date, qr_ref, approval_status, destination_type, destination_post_id FROM visit_requests WHERE id=$1", request_id
+        "SELECT id, visitor_id, visitor_name, visitor_email, host_name, host_staff_id, visit_date, qr_ref, approval_status, destination_type, destination_post_id FROM visit_requests WHERE id=$1", request_id
     )
     if not row:
         raise HTTPException(404, "Request not found")
     if row["approval_status"] != "Approved":
         raise HTTPException(400, "Request must be Approved before check-in")
+    # Physical badge lifecycle: issuing a badge registers
+    # badge_number -> visitor_id + visit_request_id. A returned badge number
+    # is reusable (the row is reactivated); an active badge cannot be stolen
+    # by another visit.
+    if body.badge_number:
+        active = await conn.fetchrow(
+            "SELECT visit_request_id FROM badges WHERE badge_number=$1 AND status='active'",
+            body.badge_number,
+        )
+        if active and active["visit_request_id"] != request_id:
+            raise HTTPException(409, f"Badge {body.badge_number} is already in use on another visit")
+        await conn.execute(
+            """INSERT INTO badges (badge_number, visitor_id, visit_request_id, issued_at, status)
+               VALUES ($1,$2,$3,NOW(),'active')
+               ON CONFLICT (badge_number) DO UPDATE
+                 SET visitor_id=EXCLUDED.visitor_id,
+                     visit_request_id=EXCLUDED.visit_request_id,
+                     issued_at=NOW(),
+                     returned_at=NULL,
+                     status='active'""",
+            body.badge_number, row["visitor_id"], request_id,
+        )
     await conn.execute(
         "UPDATE visit_requests SET status='Checked In', badge_number=$1, visitor_id_verified=$2, checked_in_at=NOW(), checked_in_by=$3 WHERE id=$4",
         body.badge_number, body.visitor_id_verified, uuid.UUID(str(current["id"])), request_id,
@@ -344,6 +407,13 @@ async def check_out(
     await conn.execute(
         "UPDATE visit_requests SET status='Checked Out', checked_out_at=NOW(), checked_out_by=$1 WHERE id=$2",
         uuid.UUID(str(current["id"])), request_id,
+    )
+    # Physical badge is returned at final checkout: status -> 'returned',
+    # returned_at set, badge_number becomes available for reuse.
+    await conn.execute(
+        "UPDATE badges SET status='returned', returned_at=NOW() "
+        "WHERE visit_request_id=$1 AND status='active'",
+        request_id,
     )
     await write_audit(conn, "Checked Out", actor=current, visit_request_id=request_id,
                       visitor_name=row["visitor_name"])
@@ -622,12 +692,10 @@ async def room_capacity(
     """Current occupancy across all rooms/posts."""
     rows = await conn.fetch(
         """
-        SELECT p.id, p.name, p.floor,
-               COUNT(rv.id) FILTER (WHERE rv.departed_at IS NULL) AS current_occupancy,
-               ARRAY_AGG(DISTINCT su.name) FILTER (WHERE su.name IS NOT NULL) AS assigned_staff
+        SELECT p.id, p.name, p.floor, p.capacity,
+               COUNT(rv.id) FILTER (WHERE rv.departed_at IS NULL) AS current_occupancy
         FROM posts p
         LEFT JOIN room_visits rv ON rv.post_id = p.id
-        LEFT JOIN staff_users su ON su.post_id = p.id AND su.is_active
         GROUP BY p.id, p.name, p.floor
         ORDER BY p.floor, p.name
         """
