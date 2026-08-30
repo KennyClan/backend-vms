@@ -59,17 +59,19 @@ _ACCESS_TO_RESTRICTION = {
 
 async def _sync_post_level(conn: asyncpg.Connection, properties):
     """When a room object is linked to a VMS post, mirror its access_level
-    onto posts.restriction_level so Room Guard enforcement and capacity
-    checks see the same level the editor shows."""
+    (and display room_number) onto posts so Room Guard enforcement,
+    capacity checks, and staff/admin room labels all see the same data the
+    floor-plan editor shows."""
     if not isinstance(properties, dict):
         return
     post_id = properties.get("post_id")
     if not post_id:
         return
     level = _ACCESS_TO_RESTRICTION.get(properties.get("access_level"), "none")
+    room_number = properties.get("room_number")
     await conn.execute(
-        "UPDATE posts SET restriction_level=$1 WHERE id=$2",
-        level, post_id,
+        "UPDATE posts SET restriction_level=$1, room_number=$2 WHERE id=$3",
+        level, room_number, post_id,
     )
 
 

@@ -84,7 +84,7 @@ async def list_staff(
         """
         SELECT su.id, su.name, su.initials, su.email, su.role, su.is_active,
                su.permissions,
-               su.post_id, p.name AS post_name,
+               su.post_id, p.name AS post_name, p.room_number AS post_room_number,
                su.department_id, d.name AS department_name
         FROM staff_users su
         LEFT JOIN posts p ON p.id = su.post_id
@@ -241,7 +241,7 @@ async def list_posts(
     rows = await conn.fetch(
         """
         SELECT p.id, p.name, p.description, p.floor, p.pos_x, p.pos_y, p.width, p.height,
-               p.capacity, p.restriction_level,
+               p.capacity, p.restriction_level, p.room_number,
                COUNT(su.id) AS assigned_count
         FROM posts p
         LEFT JOIN staff_users su ON su.post_id = p.id AND su.is_active
@@ -261,7 +261,7 @@ async def post_detail(
     """Everything an admin sees when clicking a room on the map: who's
     assigned there, and which visitors have arrived and not yet left."""
     post = await conn.fetchrow(
-        "SELECT id, name, description, floor, pos_x, pos_y, width, height, capacity, restriction_level FROM posts WHERE id=$1",
+        "SELECT id, name, description, floor, pos_x, pos_y, width, height, capacity, restriction_level, room_number FROM posts WHERE id=$1",
         post_id,
     )
     if not post:

@@ -166,6 +166,7 @@ async def lifespan(app: FastAPI):
                 pos_y FLOAT DEFAULT 0,
                 width FLOAT DEFAULT 10,
                 height FLOAT DEFAULT 10,
+                room_number TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
@@ -245,6 +246,9 @@ async def lifespan(app: FastAPI):
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='restriction_level') THEN
                     ALTER TABLE posts ADD COLUMN restriction_level TEXT NOT NULL DEFAULT 'none';
                 END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='posts' AND column_name='room_number') THEN
+                    ALTER TABLE posts ADD COLUMN room_number TEXT;
+                END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='restricted_access' AND column_name='entry_confirmed_at') THEN
                     ALTER TABLE restricted_access ADD COLUMN entry_confirmed_at TIMESTAMPTZ;
                 END IF;
@@ -252,6 +256,27 @@ async def lifespan(app: FastAPI):
                     ALTER TABLE restricted_access ADD COLUMN approved_at TIMESTAMPTZ;
                 END IF;
             END $$;
+        """)
+        # Legacy DBs missed the room_number column; backfill it from the
+        # floor-plan room objects linked to each post (properties.post_id).
+        await conn.execute("""
+            UPDATE posts p
+            SET room_number = (
+                SELECT o.properties->>'room_number'
+                FROM floor_plan_objects o
+                WHERE o.object_type = 'room'
+                  AND o.properties->>'post_id' = p.id::text
+                  AND o.properties->>'room_number' IS NOT NULL
+                ORDER BY o.created_at ASC
+                LIMIT 1
+            )
+            WHERE p.room_number IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM floor_plan_objects o
+                  WHERE o.object_type = 'room'
+                    AND o.properties->>'post_id' = p.id::text
+                    AND o.properties->>'room_number' IS NOT NULL
+              );
         """)
         logger.info("Badges, room visits & room capacity tables verified")
 
