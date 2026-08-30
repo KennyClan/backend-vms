@@ -175,6 +175,39 @@ async def lifespan(app: FastAPI):
                 ) THEN
                     ALTER TABLE visit_requests ADD COLUMN arrived_at TIMESTAMPTZ;
                 END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'destination_post_id'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN destination_post_id UUID;
+                END IF;
+                -- Guard-scan (room_visits) reads visitor contact/ID fields off
+                -- visit_requests directly, so fresh DBs need them to match the
+                -- deployed schema.
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'company'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN company TEXT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'phone'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN phone TEXT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'id_type'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN id_type TEXT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'visit_requests' AND column_name = 'id_number'
+                ) THEN
+                    ALTER TABLE visit_requests ADD COLUMN id_number TEXT;
+                END IF;
             END $$;
         """)
         logger.info("Visit request schema updated")
