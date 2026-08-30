@@ -62,7 +62,7 @@ def _row_to_dict(row):
 
 @router.get("")
 async def list_floors(
-    current: dict = Depends(require_roles(UserRole.admin, UserRole.guard, UserRole.recep)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.guard, UserRole.recep)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -73,7 +73,7 @@ async def list_floors(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_floor(
     body: FloorCreateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -93,7 +93,7 @@ async def create_floor(
 async def update_floor(
     floor_id: uuid.UUID,
     body: FloorUpdateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -119,7 +119,7 @@ async def update_floor(
 @router.delete("/{floor_id}")
 async def delete_floor(
     floor_id: uuid.UUID,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -136,7 +136,7 @@ async def delete_floor(
 @router.get("/{floor_id}/objects")
 async def list_objects(
     floor_id: uuid.UUID,
-    current: dict = Depends(require_roles(UserRole.admin, UserRole.guard, UserRole.recep)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.guard, UserRole.recep)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -151,7 +151,7 @@ async def list_objects(
 async def create_object(
     floor_id: uuid.UUID,
     body: ObjectCreateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -173,7 +173,7 @@ async def create_object(
 async def update_object(
     object_id: uuid.UUID,
     body: ObjectUpdateIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -203,7 +203,7 @@ async def update_object(
 @router.delete("/objects/{object_id}")
 async def delete_object(
     object_id: uuid.UUID,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -217,7 +217,7 @@ async def delete_object(
 @router.post("/objects/{object_id}/duplicate")
 async def duplicate_object(
     object_id: uuid.UUID,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
@@ -241,7 +241,7 @@ async def duplicate_object(
 async def bulk_save_objects(
     floor_id: uuid.UUID,
     body: BulkSaveIn,
-    current: dict = Depends(require_roles(UserRole.admin)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin)),
     _m:      dict = Depends(require_modules("floorplan")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
