@@ -113,7 +113,7 @@ async def get_current_user(
     except JWTError:
         raise cred_exc
     row = await conn.fetchrow(
-        "SELECT id, name, initials, email, role, is_active, permissions FROM staff_users WHERE id=$1",
+        "SELECT id, name, initials, email, role, is_active, permissions, post_id FROM staff_users WHERE id=$1",
         uuid.UUID(user_id),
     )
     if not row or not row["is_active"]:

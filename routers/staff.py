@@ -121,6 +121,12 @@ async def create_staff(
         if not dept_exists:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="That department does not exist")
 
+    if body.role.value == UserRole.guard.value and body.post_id is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A Security Guard must be assigned to a room — select a post before saving",
+        )
+
     permissions = _permissions_for(body.role.value, body.permissions)
     row = await conn.fetchrow(
         """
@@ -146,7 +152,7 @@ async def update_staff(
     _m:    dict = Depends(require_modules("staff")),
     conn: asyncpg.Connection = Depends(get_conn),
 ):
-    target = await conn.fetchrow("SELECT id, role, permissions FROM staff_users WHERE id=$1", staff_id)
+    target = await conn.fetchrow("SELECT id, role, permissions, post_id FROM staff_users WHERE id=$1", staff_id)
     if not target:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Staff member not found")
 
@@ -162,6 +168,16 @@ async def update_staff(
 
     new_post_id = None if body.clear_post else body.post_id
     new_dept_id = None if body.clear_department else body.department_id
+
+    # A Security Guard must always resolve to an assigned room — refusing to
+    # save a guard with no post (creation path enforces the same rule).
+    if (body.role.value if body.role else target["role"]) == UserRole.guard.value:
+        final_post_id = None if body.clear_post else (body.post_id or target["post_id"])
+        if final_post_id is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "A Security Guard must be assigned to a room — select a post before saving",
+            )
 
     # Module permissions:
     #  - changing role resets access to the new role's defaults
@@ -273,10 +289,24 @@ async def post_detail(
         post_id,
     )
 
+    last_scan = await conn.fetchrow(
+        """
+        SELECT rv.arrived_at, rv.departed_at,
+               su.name AS scanned_by_name, su.role AS scanned_by_role
+        FROM room_visits rv
+        LEFT JOIN staff_users su ON su.id = rv.scanned_by
+        WHERE rv.post_id = $1
+        ORDER BY rv.arrived_at DESC
+        LIMIT 1
+        """,
+        post_id,
+    )
+
     return {
         "post": dict(post),
         "assigned_staff": [dict(g) for g in guards],
         "visitors_inside": [dict(v) for v in visitors_inside],
+        "last_scan": dict(last_scan) if last_scan else None,
     }
 
 
@@ -306,6 +336,21 @@ async def _lookup_active_badge(conn: asyncpg.Connection, badge_number: str):
     return badge["visit_request_id"]
 
 
+async def _check_guard_room_access(post_id: uuid.UUID, current: dict):
+    """Enforce that only a Room Guard (or Super Admin) scans badges, and only
+    at the room they are assigned to (staff_users.post_id)."""
+    if current["role"] not in (UserRole.super_admin.value, UserRole.guard.value):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only a Room Guard can scan badges at a room",
+        )
+    if current.get("post_id") != post_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "You are not assigned to this room. Scan rejected.",
+        )
+
+
 @posts_router.post("/{post_id}/lookup-badge")
 async def lookup_badge(
     post_id: uuid.UUID,
@@ -315,6 +360,7 @@ async def lookup_badge(
 ):
     """Look up a badge without logging an arrival. Used by room guards to
     preview visitor details before confirming arrival."""
+    await _check_guard_room_access(post_id, current)
     visit_id = await _lookup_active_badge(conn, body.badge_number)
 
     visit = await conn.fetchrow(
@@ -360,6 +406,7 @@ async def scan_arrival(
     restriction level, logs an arrival, and flags a mismatch (without
     blocking it) if this isn't actually their assigned destination — guards
     can still admit someone off-route, but the system notes it."""
+    await _check_guard_room_access(post_id, current)
     visit_id = await _lookup_active_badge(conn, body.badge_number)
 
     visit = await conn.fetchrow(
@@ -445,6 +492,7 @@ async def scan_departure(
     Marks the active room_visits row departed, which decrements the room's
     live occupancy (counted from nondeparted rows) — satisfying the real-time
     capacity model without a mutable counter that could race."""
+    await _check_guard_room_access(post_id, current)
     visit_id = await _lookup_active_badge(conn, body.badge_number)
 
     rv = await conn.fetchrow(

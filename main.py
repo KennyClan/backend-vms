@@ -281,6 +281,21 @@ async def lifespan(app: FastAPI):
             END $$;
         """)
 
+        # Add post_id (assigned room, used by Room Guards) to staff_users if
+        # it doesn't exist — legacy DBs created before the column shipped
+        # never receive it otherwise.
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'staff_users' AND column_name = 'post_id'
+                ) THEN
+                    ALTER TABLE staff_users ADD COLUMN post_id UUID;
+                END IF;
+            END $$;
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS webauthn_credentials (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
