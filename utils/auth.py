@@ -105,6 +105,8 @@ async def get_current_user(
     cred_exc = HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("scope") == "mfa_pending":     # <-- ADD THIS LINE
+            raise cred_exc  
         user_id: str = payload.get("sub")
         if not user_id:
             raise cred_exc
