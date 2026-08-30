@@ -294,6 +294,30 @@ async def lifespan(app: FastAPI):
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+        # Existing databases created audit_log.event_type as a Postgres ENUM
+        # holding only 9 values, while the routers write ~25 different event
+        # types. Because write_audit() is best-effort (never raises), every
+        # value missing from the enum was silently dropped — leaving no audit
+        # trail for e.g. restricted-area changes, staff/department edits, and
+        # wayfinding events. Backfill the enum so all entries are recorded.
+        _audit_event_types = [
+            "Staff Login", "Staff Logout",
+            "Request Created", "Request Approved", "Request Rejected", "Request Assigned",
+            "Checked In", "Checked Out",
+            "Visitor Blocked", "Visitor Unblocked",
+            "Self-Visit Created", "Destination Arrival", "Host Notified",
+            "Biometric Registered",
+            "Staff Created", "Staff Updated",
+            "Department Created", "Department Updated", "Department Deleted",
+            "Restricted Area Created", "Restricted Area Deactivated",
+            "Restricted Access Granted", "Restricted Badge Issued",
+            "Restricted Area Entry Confirmed", "Restricted Area Exit",
+        ]
+        if await conn.fetchval("SELECT 1 FROM pg_type WHERE typname='audit_event_type'"):
+            for _et in _audit_event_types:
+                await conn.execute(
+                    f"ALTER TYPE audit_event_type ADD VALUE IF NOT EXISTS '{_et}'"
+                )
         logger.info("Audit log table verified")
 
         # Module-based access control: add permissions column to staff_users
