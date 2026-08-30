@@ -133,11 +133,21 @@ async def approve_or_reject(
     if not row:
         raise HTTPException(404, "Request not found")
 
-    # Permission check: Employee can only approve/reject their own requests
-    if current["role"] == UserRole.employee.value:
+    # Permission check: who may act on this request.
+    #   * Employee  -> only their own requests (approve or reject).
+    #   * Admin/S.A -> any request, any action.
+    #   * Receptionist -> may ONLY reject (they route mis-assigned requests
+    #     to the right employee via /assign; they never approve).
+    role = current["role"]
+    if role == UserRole.employee.value:
         if row["host_staff_id"] != uuid.UUID(str(current["id"])):
             raise HTTPException(403, "You can only approve requests where you are the host")
-    elif current["role"] not in [UserRole.admin.value, UserRole.super_admin.value]:
+    elif role in (UserRole.admin.value, UserRole.super_admin.value):
+        pass
+    elif role == UserRole.recep.value:
+        if body.action != ApprovalStatus.rejected:
+            raise HTTPException(403, "Only the host employee or an administrator can approve a request")
+    else:
         raise HTTPException(403, "Insufficient permissions")
 
     # Rejection requires a reason
@@ -183,6 +193,52 @@ async def approve_or_reject(
             ))
     await write_audit(conn, event, actor=current, visit_request_id=request_id, visitor_name=row["visitor_name"])
     return {"id": request_id, "approval_status": body.action.value}
+
+
+class AssignIn(BaseModel):
+    host_staff_id: uuid.UUID
+
+
+@router.post("/{request_id}/assign", response_model=VisitRequestOut)
+async def assign_employee(
+    request_id: uuid.UUID,
+    body:       AssignIn,
+    current:    dict               = Depends(require_roles(UserRole.recep, UserRole.admin, UserRole.super_admin)),
+    conn:       asyncpg.Connection = Depends(get_conn),
+):
+    """Receptionist (or admin) routes a mis-assigned/unassigned request to
+    the right employee. When a visitor or guard types the host name wrong
+    the request has no host_staff_id — reception sees it unassigned, picks
+    the correct employee here, and it lands back in that employee's pending
+    queue for approval. Any previous approval/destination is reset since the
+    new host still has to approve."""
+    row = await conn.fetchrow("SELECT id, status, visitor_name FROM visit_requests WHERE id=$1", request_id)
+    if not row:
+        raise HTTPException(404, "Request not found")
+    if row["status"] in ("Checked In", "Checked Out"):
+        raise HTTPException(400, "This visit has already started — it can't be re-assigned")
+
+    emp = await conn.fetchrow(
+        "SELECT id, name, email, role, is_active FROM staff_users WHERE id=$1",
+        body.host_staff_id,
+    )
+    if not emp:
+        raise HTTPException(404, "Selected employee not found")
+    if not emp["is_active"]:
+        raise HTTPException(400, "Selected employee is not active")
+
+    await conn.execute(
+        """UPDATE visit_requests
+           SET host_staff_id=$1, host_name=$2, approval_status='Pending', status='Pending',
+               rejection_reason=NULL, approved_by=NULL, approved_at=NULL, destination_post_id=NULL
+           WHERE id=$3""",
+        emp["id"], emp["name"], request_id,
+    )
+    await write_audit(conn, "Request Assigned", actor=current, visit_request_id=request_id,
+                      visitor_name=row["visitor_name"],
+                      detail=f"Re-assigned to host {emp['name']} for approval")
+
+    return dict(await conn.fetchrow("SELECT * FROM visit_requests WHERE id=$1", request_id))
 
 
 @router.patch("/{request_id}/check-in")
