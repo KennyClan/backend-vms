@@ -100,6 +100,33 @@ async def list_staff(
     return result
 
 
+@router.get("/me")
+async def get_staff_me(
+    current: dict = Depends(get_current_user),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """The calling staff member's own record (post + department). Room Guard's
+    My Room page needs this — guards are blocked from the admin-only GET /staff
+    list, so without it they can never load their assignment."""
+    row = await conn.fetchrow(
+        """
+        SELECT su.id, su.name, su.initials, su.email, su.role, su.is_active,
+               su.post_id, p.name AS post_name, p.room_number AS post_room_number,
+               su.department_id, d.name AS department_name
+        FROM staff_users su
+        LEFT JOIN posts p ON p.id = su.post_id
+        LEFT JOIN departments d ON d.id = su.department_id
+        WHERE su.id = $1
+        """,
+        current["id"],
+    )
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Staff record not found")
+    item = dict(row)
+    item["permissions"] = resolve_permissions(item["role"], item.get("permissions"))
+    return item
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_staff(
     body: StaffCreateIn,
