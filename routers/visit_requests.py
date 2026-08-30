@@ -296,10 +296,10 @@ async def check_in(
         raise HTTPException(404, "Request not found")
     if row["approval_status"] != "Approved":
         raise HTTPException(400, "Request must be Approved before check-in")
-    # Physical badge lifecycle: issuing a badge registers
-    # badge_number -> visitor_id + visit_request_id. A returned badge number
-    # is reusable (the row is reactivated); an active badge cannot be stolen
-    # by another visit.
+    # Physical badge lifecycle: issuing a badge registers a NEW badges row
+    # (badge_number -> visitor_id + visit_request_id) so the full use history
+    # is preserved. An active badge cannot be stolen by another visit; once
+    # returned, the number can be issued again (a fresh row is appended).
     if body.badge_number:
         active = await conn.fetchrow(
             "SELECT visit_request_id FROM badges WHERE badge_number=$1 AND status='active'",
@@ -308,15 +308,9 @@ async def check_in(
         if active and active["visit_request_id"] != request_id:
             raise HTTPException(409, f"Badge {body.badge_number} is already in use on another visit")
         await conn.execute(
-            """INSERT INTO badges (badge_number, visitor_id, visit_request_id, issued_at, status)
-               VALUES ($1,$2,$3,NOW(),'active')
-               ON CONFLICT (badge_number) DO UPDATE
-                 SET visitor_id=EXCLUDED.visitor_id,
-                     visit_request_id=EXCLUDED.visit_request_id,
-                     issued_at=NOW(),
-                     returned_at=NULL,
-                     status='active'""",
-            body.badge_number, row["visitor_id"], request_id,
+            """INSERT INTO badges (badge_number, visitor_id, visit_request_id, issued_by, issued_at, status)
+               VALUES ($1,$2,$3,$4,NOW(),'active')""",
+            body.badge_number, row["visitor_id"], request_id, uuid.UUID(str(current["id"])),
         )
     await conn.execute(
         "UPDATE visit_requests SET status='Checked In', badge_number=$1, visitor_id_verified=$2, checked_in_at=NOW(), checked_in_by=$3 WHERE id=$4",

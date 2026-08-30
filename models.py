@@ -50,6 +50,7 @@ ALL_MODULES = (
     "departments",
     "floorplan",
     "visitor-history",
+    "badges",
 )
 
 # Default module set per role. Used when an account has no explicit
@@ -58,14 +59,14 @@ ALL_MODULES = (
 DEFAULT_MODULES_BY_ROLE = {
     UserRole.super_admin.value: [
         "dashboard", "visitors", "requests", "security", "myroom",
-        "analytics", "audit", "restricted", "staff", "departments", "floorplan",
+        "analytics", "audit", "restricted", "staff", "departments", "floorplan", "badges",
     ],
     UserRole.admin.value: [
         "dashboard", "visitors", "requests", "security",
-        "analytics", "audit", "restricted", "staff", "departments", "floorplan",
+        "analytics", "audit", "restricted", "staff", "departments", "floorplan", "badges",
     ],
     UserRole.recep.value: [
-        "dashboard", "visitors", "requests", "analytics", "audit", "floorplan",
+        "dashboard", "visitors", "requests", "analytics", "audit", "floorplan", "badges",
     ],
     UserRole.guard.value: [
         "dashboard", "myroom", "visitors", "security", "restricted",

@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from database import create_pool, close_pool
-from routers import auth, visitors, visit_requests, audit, analytics, webauthn, staff, restricted, floor_plan, departments, wayfinding
+from routers import auth, visitors, visit_requests, audit, analytics, webauthn, staff, restricted, floor_plan, departments, wayfinding, badges
 import logging
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -177,9 +177,10 @@ async def lifespan(app: FastAPI):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS badges (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                badge_number TEXT NOT NULL UNIQUE,
+                badge_number TEXT NOT NULL,
                 visitor_id UUID,
                 visit_request_id UUID,
+                issued_by UUID,
                 issued_at TIMESTAMPTZ DEFAULT NOW(),
                 returned_at TIMESTAMPTZ,
                 status TEXT NOT NULL DEFAULT 'active'
@@ -216,6 +217,18 @@ async def lifespan(app: FastAPI):
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='status') THEN
                     ALTER TABLE badges ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='badges' AND column_name='issued_by') THEN
+                    ALTER TABLE badges ADD COLUMN issued_by UUID;
+                END IF;
+                -- One row per issuance keeps the full audit trail; a badge
+                -- number may appear many times across different visits.
+                IF EXISTS (SELECT 1 FROM information_schema.table_constraints tc
+                           JOIN information_schema.constraint_column_usage cu
+                             ON cu.constraint_name = tc.constraint_name AND cu.table_name = tc.table_name
+                           WHERE tc.table_name='badges' AND tc.constraint_type='UNIQUE'
+                             AND cu.column_name='badge_number') THEN
+                    ALTER TABLE badges DROP CONSTRAINT badges_badge_number_key;
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='room_visits' AND column_name='id_verified') THEN
                     ALTER TABLE room_visits ADD COLUMN id_verified BOOLEAN DEFAULT FALSE;
@@ -481,6 +494,7 @@ app.include_router(staff.posts_router)
 app.include_router(restricted.router)
 app.include_router(floor_plan.router)
 app.include_router(departments.router)
+app.include_router(badges.router)
 app.include_router(wayfinding.router)
 
 # Manual seed endpoint — call once after first deploy. Requires admin auth.
