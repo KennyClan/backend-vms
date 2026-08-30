@@ -460,6 +460,21 @@ async def lifespan(app: FastAPI):
         """)
         logger.info("Visit request schema updated")
 
+        # Backfill destination room for requests approved without one: the
+        # approve path now derives the host department's room, but older
+        # approvals stored NULL. Re-derive so Room Guard scans recognise them.
+        await conn.execute("""
+            UPDATE visit_requests vr
+            SET destination_post_id = d.post_id
+            FROM staff_users su
+            JOIN departments d ON d.id = su.department_id
+            WHERE vr.host_staff_id = su.id
+              AND vr.destination_post_id IS NULL
+              AND vr.approval_status = 'Approved'
+              AND d.post_id IS NOT NULL
+        """)
+        logger.info("Visit request destination backfill applied")
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

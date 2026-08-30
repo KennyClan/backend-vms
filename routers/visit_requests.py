@@ -179,17 +179,33 @@ async def approve_or_reject(
         raise HTTPException(400, "Rejection reason is required")
 
     if body.action == ApprovalStatus.approved:
+        # Room destination: the approving employee can pick the room. If none
+        # was provided, default to the hosting department's own room — the
+        # room that department owns and that its Room Guard scans at. This is
+        # what makes the guard sweep work end-to-end: approve > front desk
+        # badge > guard scan all agree on the destination.
+        destination_post_id = body.destination_post_id
+        if not destination_post_id and row["host_staff_id"]:
+            destination_post_id = await conn.fetchval(
+                """
+                SELECT d.post_id
+                FROM staff_users su
+                JOIN departments d ON d.id = su.department_id
+                WHERE su.id = $1 AND d.post_id IS NOT NULL
+                """,
+                row["host_staff_id"],
+            )
         # Room capacity check before finalizing approval into a room
-        if body.destination_post_id:
+        if destination_post_id:
             post = await conn.fetchrow(
-                "SELECT capacity FROM posts WHERE id=$1", body.destination_post_id
+                "SELECT capacity FROM posts WHERE id=$1", destination_post_id
             )
             if not post:
                 raise HTTPException(404, "Destination room not found")
             occ = await conn.fetchval(
                 """SELECT COUNT(*) FROM room_visits
                    WHERE post_id=$1 AND departed_at IS NULL""",
-                body.destination_post_id,
+                destination_post_id,
             )
             if occ >= post["capacity"]:
                 raise HTTPException(
@@ -198,7 +214,7 @@ async def approve_or_reject(
                 )
         await conn.execute(
             "UPDATE visit_requests SET approval_status='Approved', status='Pending Arrival', approved_by=$1, approved_at=NOW(), destination_post_id=$3 WHERE id=$2",
-            uuid.UUID(str(current["id"])), request_id, body.destination_post_id,
+            uuid.UUID(str(current["id"])), request_id, destination_post_id,
         )
         event = "Request Approved"
 
@@ -569,9 +585,10 @@ async def create_self_visit(
 
     # Auto-derive destination_type from employee's department
     destination_type = "Normal"
+    destination_post_id = None
     dept_info = await conn.fetchrow(
         """
-        SELECT d.is_restricted
+        SELECT d.is_restricted, d.post_id
         FROM staff_users su
         JOIN departments d ON d.id = su.department_id
         WHERE su.id = $1
@@ -580,19 +597,22 @@ async def create_self_visit(
     )
     if dept_info and dept_info["is_restricted"]:
         destination_type = "Restricted"
+    if dept_info and dept_info["post_id"]:
+        destination_post_id = dept_info["post_id"]
 
     row = await conn.fetchrow(
         """
         INSERT INTO visit_requests
           (visitor_name, visitor_email, company, phone,
            host_name, host_staff_id, visit_date, expected_time, purpose,
-           approval_status, status, approved_by, approved_at, destination_type)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Approved','Pending Arrival',$10,NOW(),$11)
+           approval_status, status, approved_by, approved_at, destination_type,
+           destination_post_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Approved','Pending Arrival',$10,NOW(),$11,$12)
           RETURNING *
         """,
         body.visitor_name, body.visitor_email, body.company, body.phone,
         host_name, host_id, body.visit_date, body.expected_time, body.purpose,
-        host_id, destination_type,
+        host_id, destination_type, destination_post_id,
     )
 
     await write_audit(conn, "Self-Visit Created", actor=current, visit_request_id=row["id"],
