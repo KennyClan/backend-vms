@@ -175,8 +175,8 @@ async def grant_access(
 @router.post("/badge/issue")
 async def issue_badge(
     body:    IssueBadgeIn,
-    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep)),
-    _m:      dict               = Depends(require_modules("restricted")),
+    current: dict               = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep, UserRole.guard)),
+    _m:      dict               = Depends(require_modules("security")),
     conn:    asyncpg.Connection = Depends(get_conn),
 ):
     # Look up visit request by QR ref

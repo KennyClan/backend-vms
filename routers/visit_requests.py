@@ -301,8 +301,8 @@ async def assign_employee(
 @router.patch("/{request_id}/check-in")
 async def check_in(
     request_id: uuid.UUID,
-    body:       CheckInIn,
-    current:    dict               = Depends(require_roles(UserRole.super_admin, UserRole.admin, UserRole.recep)),
+    body: CheckInIn,
+    current:    dict               = Depends(require_roles(UserRole.super_admin, UserRole.admin, UserRole.recep, UserRole.guard)),
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
     """FRONT DESK (building entrance, not room-specific): scan the visitor's

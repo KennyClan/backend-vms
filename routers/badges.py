@@ -24,7 +24,7 @@ async def list_badges(
     status: str   = Query("all", description="all | active | returned"),
     q:      str   = Query("",   description="Search badge_number or visitor_name"),
     limit:  int   = Query(200, ge=1, le=1000),
-    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep)),
+    current: dict = Depends(require_roles(UserRole.admin, UserRole.super_admin, UserRole.recep, UserRole.guard)),
     conn:   asyncpg.Connection = Depends(get_conn),
 ):
     """Badge audit registry with status filter and keyword search."""
