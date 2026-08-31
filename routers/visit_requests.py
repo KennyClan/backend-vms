@@ -410,14 +410,20 @@ async def check_out(
     current:    dict               = Depends(require_roles(UserRole.super_admin, UserRole.admin, UserRole.recep)),
     conn:       asyncpg.Connection = Depends(get_conn),
 ):
-    """FRONT DESK building exit: marks the visit Checked Out and returns the
-    badge. Room-specific departures are logged by the Room Guard via
-    /posts/{id}/departures — the two flows never meet."""
+    """FRONT DESK building exit: confirms the visitor has left the building
+    and returns the badge. When the Room Guard already completed the visit by
+    scanning the badge at departure (visit status 'Checked Out' + badge
+    returned), this is a pure confirmation — no-op, never an error."""
     row = await conn.fetchrow(
         "SELECT visitor_name, visitor_email, host_name, visit_date, status FROM visit_requests WHERE id=$1", request_id
     )
     if not row:
         raise HTTPException(404, "Request not found")
+    if row["status"] == "Checked Out":
+        # Already cleared by the Room Guard's departure scan — nothing to do.
+        await write_audit(conn, "Checked Out", actor=current, visit_request_id=request_id,
+                          visitor_name=row["visitor_name"], detail="Already checked out by room guard")
+        return {"id": request_id, "status": "Checked Out", "detail": "Already checked out"}
     if row["status"] != "Checked In":
         raise HTTPException(400, "Visitor must be Checked In before check-out")
     await conn.execute(

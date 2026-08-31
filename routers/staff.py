@@ -616,13 +616,16 @@ async def scan_arrival(
 async def scan_departure(
     post_id: uuid.UUID,
     body: DepartureScanIn,
-    current: dict = Depends(get_current_user),  # the guard doing the scan
+    current: dict = Depends(get_current_user),  # the Room Guard doing the scan
     conn: asyncpg.Connection = Depends(get_conn),
 ):
-    """Room guard checks a visitor out of a room by scanning their badge.
-    Marks the active room_visits row departed, which decrements the room's
-    live occupancy (counted from nondeparted rows) — satisfying the real-time
-    capacity model without a mutable counter that could race."""
+    """Room Guard GRACEFULLY checks a visitor out by scanning their badge a
+    second time as they leave the room. This is THE 'the visitor has left'
+    signal: it marks the active room_visits row departed (decrementing the
+    room's live occupancy), advances the visit to Checked Out, and returns
+    the physical badge so its number frees up. The Front Desk's building-exit
+    scan becomes a no-op confirmation for these visits — departure is decided
+    here at the room, not by the employee at the gate."""
     await _check_guard_room_access(post_id, current)
     visit_id = await _lookup_active_badge(conn, body.badge_number)
 
@@ -640,13 +643,32 @@ async def scan_departure(
     await conn.execute(
         "UPDATE room_visits SET departed_at=NOW() WHERE id=$1", rv["id"]
     )
-    visit = await conn.fetchrow(
-        "SELECT visitor_name FROM visit_requests WHERE id=$1", visit_id
+    # The visit is complete once the visitor leaves the room: finalise the
+    # request and return the badge in the same transaction as the scan so
+    # the whole system (dashboard, KPIs, visitor history) sees the departure.
+    await conn.execute(
+        "UPDATE visit_requests SET status='Checked Out', checked_out_at=NOW(), checked_out_by=$1 WHERE id=$2",
+        uuid.UUID(str(current["id"])), visit_id,
     )
+    await conn.execute(
+        "UPDATE badges SET status='returned', returned_at=NOW() "
+        "WHERE visit_request_id=$1 AND status='active'",
+        visit_id,
+    )
+    visit = await conn.fetchrow(
+        "SELECT visitor_name, purpose, badge_number FROM visit_requests WHERE id=$1", visit_id
+    )
+    room = await conn.fetchrow("SELECT name, room_number FROM posts WHERE id=$1", post_id)
     await write_audit(conn, "Room Departure", actor=current, visit_request_id=visit_id,
                       visitor_name=visit["visitor_name"] if visit else None,
-                      detail="Room departure scan")
-    return {"room_visit_id": rv["id"], "detail": "Departure logged"}
+                      detail=f"Visitor left {_room_label_from_row(room)} — badge returned")
+    return {
+        "room_visit_id": rv["id"],
+        "visitor_name": visit["visitor_name"] if visit else None,
+        "purpose": visit["purpose"] if visit else None,
+        "badge_number": visit["badge_number"] if visit else None,
+        "detail": f"Visitor departed {_room_label_from_row(room)}",
+    }
 
 
 @posts_router.get("/{post_id}/recent-arrivals")
